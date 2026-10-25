@@ -1,0 +1,25 @@
+# intro_skip: skip startup logo texture loads and splash wait branch.
+[mod]
+id = "eu.savagecore.intro_skip"
+version = "0.1.0"
+enabled = true
+
+[features]
+logo_texture = true
+logo_wait = true
+
+[[patch]]
+id = "logo-texture"
+feature = "logo_texture"
+op = "force-branch"
+pattern = "48 3b df 0f 84 ?? ?? ?? ?? 45 33 ed 44 38 2b 0f 84 ?? ?? ?? ??"
+offset = 15
+
+[[patch]]
+id = "logo-wait"
+feature = "logo_wait"
+op = "write-bytes"
+pattern = "83 f9 05 74 ?? 83 f9 06 74 ?? 44 38 ?? ?? ?? ?? ?? 0f 84 ?? ?? ?? ??"
+offset = 17
+expect = "0f 84"
+bytes = "66 0f 1f 44 00 00"

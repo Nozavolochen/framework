@@ -1,0 +1,39 @@
+[center][size=5][b]Nozavolochen[/b][/size]
+One shared host DLL for independent spec-driven runtime mods[/center]
+[b]What it does[/b]
+
+Nozavolochen (Korvax for "convergence") is a single `xinput9_1_0.dll` that hosts any number of mods. Each mod is a folder with a `mod.toml` describing pattern patches the loader applies at game boot. Mods that are static data only need no framework support at all.
+
+On its own, Nozavolochen does nothing. It only provides the infrastructure for mods to hook into the game.
+
+[b]Why[/b]
+
+Nozavolochen exists to unify mod loading under a single DLL, reducing conflicts and simplifying the modding process. When I built [url=https://www.nexusmods.com/nomanssky/mods/4697]Bigger Item Grids and Smaller Inventory Slots[/url] I needed to include the functionality of [url=https://www.nexusmods.com/nomanssky/mods/4545]NMS BootSkip[/url] as only one DLL can load at a time, which motivated the creation of a shared host for multiple mods.
+
+[b]Install[/b]
+
+Install the archive as a [b]Root Folder[/b] mod (Amethyst: right-click the mod and select [b]Enable Root Folder install[/b]) or drop its contents into the game folder, so `xinput9_1_0.dll` lands in `Binaries/`. Then install any Nozavolochen mods normally; each declares this mod as a required dependency.
+
+On Linux (Proton), add this line to the game's Launch Options:
+
+[code]WINEDLLOVERRIDES="xinput9_1_0=n,b" %command%[/code]
+
+After launch, `Binaries/nozavolochen.log` records per-mod results to help with debugging.
+
+[b]Compatibility[/b]
+[list]
+[*]Pattern-scanned hooks against NMS.exe, built for Cosmos v7.04. A game update can shift the patterns, and the log will say which patch refused to apply instead of misbehaving[/*]
+[*]Forward the 7 XInput exports to the system DLL, so controllers keep working with or without patches applied[/*]
+[/list]
+
+[b]Documentation[/b]
+
+[url=https://nozavolochen.github.io/docs/]https://nozavolochen.github.io/docs/[/url]
+
+[b]Source[/b]
+
+[url=https://github.com/Nozavolochen/framework]https://github.com/Nozavolochen/framework[/url]
+
+[b]License[/b]
+
+[url=https://github.com/Nozavolochen/framework/blob/main/LICENSE]MIT[/url]

@@ -1,0 +1,12 @@
+# mod_warning_skip: skip the mods-detected warning dialog by retargeting
+# its case jump to the shared check's skip destination.
+[mod]
+id = "eu.savagecore.mod_warning_skip"
+version = "0.1.0"
+enabled = true
+
+[[patch]]
+id = "mod-warning"
+op = "retarget-jmp"
+pattern = "e8 ?? ?? ?? ?? 48 8b c8 e8 ?? ?? ?? ?? e9 ?? ?? ?? ??"
+offset = 13

@@ -1,0 +1,31 @@
+name: New patch operation
+description: A runtime behaviour the five patch operations cannot express.
+title: "[operation]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New operations are added only when a real mod needs them and no
+        combination of the existing five expresses it. Show the gap.
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Runtime behaviour wanted
+      description: What the game should do differently, in concrete terms.
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Why the existing operations cannot express it
+      description: Closest operation tried and where it falls short.
+    validations:
+      required: true
+  - type: input
+    id: game-version
+    attributes:
+      label: Game version checked against
+      placeholder: Cosmos v7.04
+    validations:
+      required: true

@@ -1,0 +1,28 @@
+# bigger_item_grids_fixes: runtime halves of the bigger-grids mod.
+# Both must stay on for the grids to function, and the matching static
+# UI MBINs (8x3 popups, scaled slots/boxes, inventory pages) must ship
+# alongside.
+[mod]
+id = "eu.savagecore.bigger_item_grids_fixes"
+version = "0.1.0"
+enabled = true
+
+[features]
+popup_pages = true
+inventory_grid = true
+
+[[patch]]
+id = "popup-pages"
+feature = "popup_pages"
+op = "page-size-override"
+items = 24
+
+[[patch]]
+id = "inventory-grid"
+feature = "inventory_grid"
+op = "detour-with-arg-overrides"
+pattern = "48 85 d2 0f 84 ?? ?? ?? ?? 48 8b c4 4c 89 48 ?? 4c 89 40"
+slot_width = 63
+cargo_rows = 7
+tech_rows = 4
+panel_width = 724.5

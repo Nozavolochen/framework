@@ -1,0 +1,69 @@
+name: Bug report
+description: A patch did not apply, or the game misbehaved with the host DLL loaded.
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Paste the requested files as text. The log almost always names the
+        drifted patch, so start there before writing anything else.
+  - type: input
+    id: framework-version
+    attributes:
+      label: Framework version
+      description: Release of Nozavolochen Framework.zip you installed.
+      placeholder: 0.0.0
+    validations:
+      required: true
+  - type: input
+    id: game-version
+    attributes:
+      label: Game version
+      description: As shown in-game, e.g. Cosmos v7.04.
+      placeholder: Cosmos v7.04
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Native Windows
+        - Proton (Linux)
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: Installed mods
+      description: Every folder under GAMEDATA/MODS, with a Nexus link for each.
+      placeholder: |
+        Bigger Item Grids and Smaller Inventory Slots (https://www.nexusmods.com/nomanssky/mods/xxxx)
+        Intro Skip (https://www.nexusmods.com/nomanssky/mods/xxxx)
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Binaries/nozavolochen.log
+      description: Full contents after the failing run.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: mod.toml being loaded
+      description: Full contents of the mod spec involved.
+      render: toml
+    validations:
+      required: false
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What happened, what did you expect
+      description: Visible symptom plus the expected behaviour.
+    validations:
+      required: true

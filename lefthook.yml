@@ -1,0 +1,12 @@
+pre-commit:
+  jobs:
+    - name: rustfmt
+      run: cargo fmt --check
+      root: loader/
+
+pre-push:
+  jobs:
+    - name: loader build
+      run: make loader
+    - name: spec check
+      run: make check
