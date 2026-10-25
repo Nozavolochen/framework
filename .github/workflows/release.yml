@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mingw
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 zip
+
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          CARGO_VERSION="$(grep '^version' loader/Cargo.toml | head -1 | cut -d'"' -f2)"
+          echo "cargo_version=${CARGO_VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "tag version ${VERSION} does not match loader/Cargo.toml ${CARGO_VERSION}" >&2
+            exit 1
+          fi
+          ZIP="dist/Nozavolochen Framework ${VERSION}.zip"
+          echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Build framework zip
+        run: make dist
+
+      - name: Verify zip exists
+        env:
+          ZIP: ${{ steps.version.outputs.zip }}
+        run: |
+          ls -lh "dist/"
+          test -f "${ZIP}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+
+      - name: Upload to Nexus Mods
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: 8233368
+          mod_id: 7017976566364
+          filename: ${{ steps.version.outputs.zip }}
+          version: ${{ steps.version.outputs.version }}
+          display_name: Nozavolochen Framework ${{ steps.version.outputs.version }}
+          primary_mod_manager_download: true
+          update_mod_version: true
