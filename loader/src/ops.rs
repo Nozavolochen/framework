@@ -361,23 +361,31 @@ unsafe extern "system" fn detour(
     let orig: DoSlotsFn = std::mem::transmute(TRAMPOLINE);
     let slot = HOOK_SLOT;
     match override_rows(slot_width, render_height, layer) {
-        Some(rows) => orig(
-            page,
-            layer,
-            inventory,
-            empty_slot_actions,
-            slots_wide,
-            popup_actions,
-            disabled,
-            min_index,
-            slot,
-            slot,
-            can_hide_slots,
-            render_width,
-            rows,
-            compare_special,
-            scroll_offset,
-        ),
+        Some(rows) => {
+            // The game computes the scroll offset in vanilla-slot pixels
+            // (90px). With smaller slots the same offset scrolls too far
+            // (one vanilla row = 90px lands mid-row at 63px), clipping the
+            // top row. Scale into modded-slot pixels so vanilla-aligned
+            // positions (90*k) stay aligned (63*k).
+            let scaled_scroll = scroll_offset * (slot as f32 / VANILLA_SLOT as f32);
+            orig(
+                page,
+                layer,
+                inventory,
+                empty_slot_actions,
+                slots_wide,
+                popup_actions,
+                disabled,
+                min_index,
+                slot,
+                slot,
+                can_hide_slots,
+                render_width,
+                rows,
+                compare_special,
+                scaled_scroll,
+            )
+        }
         None => orig(
             page,
             layer,
