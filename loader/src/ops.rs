@@ -1,4 +1,4 @@
-//! The five v1 patch operations, run against spec parameters.
+//! The patch operations, run against spec parameters.
 //!
 //! Algorithms are ported from the proven per-feature implementations:
 //! every patch is runtime-computed (jump targets re-derived from the
@@ -10,7 +10,7 @@ use retour::RawDetour;
 
 use crate::log::Log;
 use crate::patch;
-use crate::spec::Op;
+use crate::spec::{Op, Patch, Setting};
 
 fn text() -> Result<(usize, usize), String> {
     patch::host_text()
@@ -27,6 +27,7 @@ fn unique(pat: &[u8], mask: &[u8]) -> Result<usize, String> {
 }
 
 fn run_write_bytes(
+    id: &str,
     pat: &[u8],
     mask: &[u8],
     offset: usize,
@@ -44,10 +45,11 @@ fn run_write_bytes(
         }
     }
     patch::write_bytes(at, bytes, Some(&cur))?;
+    applied_record(id, at, cur);
     Ok(format!("@ rva {} [pattern match]", patch::rva_of(at)))
 }
 
-fn run_force_branch(pat: &[u8], mask: &[u8], offset: usize) -> Result<String, String> {
+fn run_force_branch(id: &str, pat: &[u8], mask: &[u8], offset: usize) -> Result<String, String> {
     let hit = unique(pat, mask)?;
     let at = hit + offset;
     let cur = patch::read_bytes(at, 6);
@@ -62,10 +64,11 @@ fn run_force_branch(pat: &[u8], mask: &[u8], offset: usize) -> Result<String, St
     buf[1..5].copy_from_slice(&new_rel.to_le_bytes());
     buf[5] = 0x90;
     patch::write_bytes(at, &buf, Some(&cur))?;
+    applied_record(id, at, cur);
     Ok(format!("@ rva {} [pattern match]", patch::rva_of(at)))
 }
 
-fn run_retarget_jmp(pat: &[u8], mask: &[u8], offset: usize) -> Result<String, String> {
+fn run_retarget_jmp(id: &str, pat: &[u8], mask: &[u8], offset: usize) -> Result<String, String> {
     let (base, len) = text()?;
     let hits = patch::scan(base, len, pat, mask);
     if hits.is_empty() {
@@ -108,6 +111,7 @@ fn run_retarget_jmp(pat: &[u8], mask: &[u8], offset: usize) -> Result<String, St
             buf[1..5].copy_from_slice(&new_rel.to_le_bytes());
             let cur = patch::read_bytes(at, 5);
             patch::write_bytes(at, &buf, Some(&cur))?;
+            applied_record(id, at, cur);
             Ok(format!("@ rva {} [pattern match]", patch::rva_of(at)))
         }
         0 => Err("no backward-jump case into a test al,al check".into()),
@@ -128,11 +132,36 @@ fn host_exe_path() -> Result<String, String> {
     }
 }
 
-fn run_page_size_override(items: u32) -> Result<String, String> {
-    use crate::image;
-    if items == 8 {
-        return Ok("8 items per page, the game default. Nothing patched.".into());
+/// Applied page plans, for restore-then-reapply on retune:
+/// (cave originals, patch originals).
+static PAGES: OnceLock<Mutex<Option<AppliedPages>>> = OnceLock::new();
+
+struct AppliedPages {
+    caves: Vec<(usize, Vec<u8>)>,
+    patches: Vec<(usize, Vec<u8>)>,
+}
+
+fn pages_lock() -> &'static Mutex<Option<AppliedPages>> {
+    PAGES.get_or_init(|| Mutex::new(None))
+}
+
+/// Restore whatever a previous page plan wrote, if anything.
+fn pages_restore() -> Result<bool, String> {
+    let prev = pages_lock()
+        .lock()
+        .map_err(|_| "page cache lock poisoned".to_string())?
+        .take();
+    let Some(applied) = prev else {
+        return Ok(false);
+    };
+    for (addr, bytes) in applied.caves.iter().chain(applied.patches.iter()) {
+        patch::write_bytes(*addr, bytes, None)?;
     }
+    Ok(true)
+}
+
+fn pages_apply(items: u32) -> Result<String, String> {
+    use crate::image;
     let exe = host_exe_path()?;
     let img = image::FileImage::load(&exe)?;
     let plans = image::plan_all(&img, items).map_err(|e| format!("left vanilla: {e}"))?;
@@ -156,20 +185,54 @@ fn run_page_size_override(items: u32) -> Result<String, String> {
                 }
             }
         }
-        // All verified: write caves then patches.
+        // All verified: snapshot cave originals, write caves + patches.
+        let mut caves = Vec::new();
+        let mut olds = Vec::new();
         for p in &plans {
             let cave = base + p.cave_rva;
+            caves.push((cave, patch::read_bytes(cave, 4)));
             patch::write_bytes(cave, &p.scale.to_le_bytes(), Some(&[0xCC; 4]))
                 .map_err(|e| format!("cave write failed: {e}"))?;
             for (rva, old, new) in &p.patches {
                 let va = base + rva;
+                olds.push((va, old.clone()));
                 patch::write_bytes(va, new, Some(old)).map_err(|e| format!("{}: {e}", p.label))?;
             }
+        }
+        if let Ok(mut guard) = pages_lock().lock() {
+            *guard = Some(AppliedPages {
+                caves,
+                patches: olds,
+            });
         }
     }
     Ok(format!(
         "{items} items per page on Transfer Items and Craft Product"
     ))
+}
+
+/// Retune the page size: restore the previous plan, then apply fresh
+/// (or stay vanilla when off or at the 8-item default).
+fn retune_pages(_id: &str, on: bool, items: i64) -> Result<String, String> {
+    if items < 1 || items > 127 {
+        return Err(format!("items {items} outside 1 to 127"));
+    }
+    let restored = pages_restore()?;
+    if !on || items == 8 {
+        return Ok(if restored {
+            "restored vanilla (8 per page)".into()
+        } else {
+            "8 items per page, the game default. Nothing patched.".into()
+        });
+    }
+    pages_apply(items as u32)
+}
+
+fn run_page_size_override(items: u32) -> Result<String, String> {
+    if items == 8 {
+        return Ok("8 items per page, the game default. Nothing patched.".into());
+    }
+    pages_apply(items)
 }
 
 // DoInventorySlots hook: 15 args, so RawDetour (retour caps at 14).
@@ -335,14 +398,89 @@ unsafe extern "system" fn detour(
     }
 }
 
-fn run_detour(
-    pat: &[u8],
-    mask: &[u8],
+struct DetourTuning<'a> {
+    pat: &'a [u8],
+    mask: &'a [u8],
     slot_width: i32,
     cargo_rows: i32,
     tech_rows: i32,
     panel_width: f64,
-) -> Result<String, String> {
+}
+
+fn detour_store(t: &DetourTuning) {
+    unsafe {
+        HOOK_SLOT = t.slot_width;
+        HOOK_CARGO = t.cargo_rows;
+        HOOK_TECH = t.tech_rows;
+        HOOK_PANEL_W = t.panel_width;
+    }
+}
+
+fn detour_detail(t: &DetourTuning, at: usize) -> String {
+    format!(
+        "slot renderer hooked @ rva {} [pattern match] (slot {}, cargo {}, tech {}, panel {:.1})",
+        patch::rva_of(at),
+        t.slot_width,
+        t.cargo_rows,
+        t.tech_rows,
+        t.panel_width
+    )
+}
+
+/// Whether the slot detour is installed (TRAMPOLINE tracks DETOUR:
+/// both are set together on install and never cleared).
+fn detour_installed() -> bool {
+    unsafe { !TRAMPOLINE.is_null() }
+}
+
+fn detour_enable() -> Result<(), String> {
+    unsafe {
+        let slot: *const Option<RawDetour> = std::ptr::addr_of!(DETOUR);
+        match &*slot {
+            Some(d) => d
+                .enable()
+                .map_err(|e| format!("detour enable failed: {e:?}")),
+            None => Err("detour not installed".into()),
+        }
+    }
+}
+
+fn detour_disable() -> Result<(), String> {
+    unsafe {
+        let slot: *const Option<RawDetour> = std::ptr::addr_of!(DETOUR);
+        match &*slot {
+            Some(d) => d
+                .disable()
+                .map_err(|e| format!("detour disable failed: {e:?}")),
+            None => Err("detour not installed".into()),
+        }
+    }
+}
+
+/// Retune the inventory detour: the hook reads its tuning from the
+/// HOOK_* globals every call, so new values apply instantly. Toggling
+/// off disables the detour; toggling back on re-enables it (or
+/// installs it fresh when boot left it off).
+fn retune_detour(_id: &str, on: bool, t: DetourTuning) -> Result<String, String> {
+    detour_store(&t);
+    if !detour_installed() {
+        if !on {
+            return Ok("already vanilla".into());
+        }
+        let at = install_detour(&t)?;
+        return Ok(detour_detail(&t, at));
+    }
+    if on {
+        detour_enable()?;
+        let at = hook_addr(t.pat, t.mask)?;
+        Ok(detour_detail(&t, at))
+    } else {
+        detour_disable()?;
+        Ok("detour disabled, vanilla renderer".into())
+    }
+}
+
+fn hook_addr(pat: &[u8], mask: &[u8]) -> Result<usize, String> {
     let (base, len) = text()?;
     let hits = patch::scan(base, len, pat, mask);
     if hits.len() != 1 {
@@ -354,12 +492,12 @@ fn run_detour(
             hits.len()
         ));
     }
-    let target = hits[0];
+    Ok(hits[0])
+}
+
+fn install_detour(t: &DetourTuning) -> Result<usize, String> {
+    let target = hook_addr(t.pat, t.mask)?;
     unsafe {
-        HOOK_SLOT = slot_width;
-        HOOK_CARGO = cargo_rows;
-        HOOK_TECH = tech_rows;
-        HOOK_PANEL_W = panel_width;
         let d = RawDetour::new(target as *const (), detour as *const ())
             .map_err(|e| format!("detour create failed: {e:?}"))?;
         d.enable()
@@ -367,25 +505,35 @@ fn run_detour(
         TRAMPOLINE = d.trampoline();
         DETOUR = Some(d);
     }
-    Ok(format!(
-        "slot renderer hooked @ rva {} [pattern match]",
-        patch::rva_of(target)
-    ))
+    Ok(target)
 }
 
-/// Run one spec op. `bytes_name` is used only for NOP6 shorthand.
-pub fn run(op: &Op, _log: &mut Log) -> Result<String, String> {
-    match op {
+/// Live-reload entry: push changed tuning into an already applied
+/// patch. Pattern changes never travel this path (hooks do not move);
+/// only tuning keys are re-applied.
+pub fn retune(patch: &Patch, settings: &[Setting], enabled: bool) -> Result<String, String> {
+    let on = enabled && bool_setting(settings, &patch.id, true);
+    match &patch.op {
         Op::WriteBytes {
             pat,
             mask,
             offset,
             expect,
             bytes,
-        } => run_write_bytes(pat, mask, *offset, expect.as_deref(), bytes),
-        Op::ForceBranch { pat, mask, offset } => run_force_branch(pat, mask, *offset),
-        Op::RetargetJmp { pat, mask, offset } => run_retarget_jmp(pat, mask, *offset),
-        Op::PageSizeOverride { items } => run_page_size_override(*items),
+        } => retune_bytes(&patch.id, on, &mut || {
+            run_write_bytes(&patch.id, pat, mask, *offset, expect.as_deref(), bytes)
+        }),
+        Op::ForceBranch { pat, mask, offset } => retune_bytes(&patch.id, on, &mut || {
+            run_force_branch(&patch.id, pat, mask, *offset)
+        }),
+        Op::RetargetJmp { pat, mask, offset } => retune_bytes(&patch.id, on, &mut || {
+            run_retarget_jmp(&patch.id, pat, mask, *offset)
+        }),
+        Op::PageSizeOverride { items } => retune_pages(
+            &patch.id,
+            on,
+            int_setting(settings, "items").unwrap_or(*items as i64),
+        ),
         Op::DetourWithArgOverrides {
             pat,
             mask,
@@ -393,13 +541,157 @@ pub fn run(op: &Op, _log: &mut Log) -> Result<String, String> {
             cargo_rows,
             tech_rows,
             panel_width,
-        } => run_detour(
+        } => retune_detour(
+            &patch.id,
+            on,
+            DetourTuning {
+                pat,
+                mask,
+                slot_width: int_setting(settings, "slot_width").unwrap_or(*slot_width as i64)
+                    as i32,
+                cargo_rows: int_setting(settings, "cargo_rows").unwrap_or(*cargo_rows as i64)
+                    as i32,
+                tech_rows: int_setting(settings, "tech_rows").unwrap_or(*tech_rows as i64) as i32,
+                panel_width: float_setting(settings, "panel_width").unwrap_or(*panel_width),
+            },
+        ),
+    }
+}
+
+/// Read one setting's live value, parsed. Unknown ids and unparsable
+/// values yield None; callers fall back to the patch key default.
+fn find_setting<'a>(settings: &'a [Setting], id: &str) -> Option<&'a Setting> {
+    settings.iter().find(|s| s.id == id)
+}
+
+fn bool_setting(settings: &[Setting], id: &str, default: bool) -> bool {
+    match find_setting(settings, id) {
+        None => default,
+        Some(s) => match s.current().trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => true,
+            "false" | "0" | "no" | "off" => false,
+            _ => default,
+        },
+    }
+}
+
+fn int_setting(settings: &[Setting], id: &str) -> Option<i64> {
+    find_setting(settings, id)?.current().trim().parse().ok()
+}
+
+fn float_setting(settings: &[Setting], id: &str) -> Option<f64> {
+    find_setting(settings, id)?.current().trim().parse().ok()
+}
+
+/// Whether a patch runs: mod on, and no bool setting with the
+/// patch's id switching it off. Shared by boot and reload.
+pub fn patch_on(spec: &crate::spec::Mod, patch: &Patch) -> bool {
+    spec.enabled && bool_setting(&spec.settings, &patch.id, true)
+}
+
+// ---------------------------------------------------------------------------
+// Byte patches: apply/restore with original-byte cache.
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Patch id -> (address, original bytes) for every applied byte patch.
+/// Disabling a patch writes the originals back; the entry is removed.
+static APPLIED: OnceLock<Mutex<HashMap<String, Vec<(usize, Vec<u8>)>>>> = OnceLock::new();
+
+fn applied_lock() -> &'static Mutex<HashMap<String, Vec<(usize, Vec<u8>)>>> {
+    APPLIED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn applied_record(id: &str, addr: usize, original: Vec<u8>) {
+    if let Ok(mut guard) = applied_lock().lock() {
+        guard.insert(id.to_string(), vec![(addr, original)]);
+    }
+}
+
+fn applied_take(id: &str) -> Option<Vec<(usize, Vec<u8>)>> {
+    applied_lock().lock().ok()?.remove(id)
+}
+
+fn applied_has(id: &str) -> bool {
+    applied_lock()
+        .lock()
+        .is_ok_and(|guard| guard.contains_key(id))
+}
+
+/// Enable/disable a byte patch: run fresh when switching on, write
+/// the cached originals back when switching off.
+fn retune_bytes(
+    id: &str,
+    on: bool,
+    run: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<String, String> {
+    if on {
+        if applied_has(id) {
+            return Ok("already applied".into());
+        }
+        return run();
+    }
+    match applied_take(id) {
+        None => Ok("already vanilla".into()),
+        Some(originals) => {
+            for (addr, bytes) in &originals {
+                patch::write_bytes(*addr, bytes, None)?;
+            }
+            Ok("restored vanilla".into())
+        }
+    }
+}
+/// Run one spec op. Settings with a tuning key's id override the
+/// patch key defaults; a bool setting with the patch's id gates the
+/// patch on/off (checked by the caller via patch_on).
+pub fn run(patch: &Patch, settings: &[Setting], _log: &mut Log) -> Result<String, String> {
+    let op = &patch.op;
+    match op {
+        Op::WriteBytes {
             pat,
             mask,
-            *slot_width,
-            *cargo_rows,
-            *tech_rows,
-            *panel_width,
-        ),
+            offset,
+            expect,
+            bytes,
+        } => run_write_bytes(&patch.id, pat, mask, *offset, expect.as_deref(), bytes),
+        Op::ForceBranch { pat, mask, offset } => run_force_branch(&patch.id, pat, mask, *offset),
+        Op::RetargetJmp { pat, mask, offset } => run_retarget_jmp(&patch.id, pat, mask, *offset),
+        Op::PageSizeOverride { items } => {
+            let n = int_setting(settings, "items").unwrap_or(*items as i64);
+            if n < 1 || n > 127 {
+                return Err(format!("items {n} outside 1 to 127"));
+            }
+            run_page_size_override(n as u32)
+        }
+        Op::DetourWithArgOverrides {
+            pat,
+            mask,
+            slot_width,
+            cargo_rows,
+            tech_rows,
+            panel_width,
+        } => {
+            let t = DetourTuning {
+                pat,
+                mask,
+                slot_width: int_setting(settings, "slot_width").unwrap_or(*slot_width as i64)
+                    as i32,
+                cargo_rows: int_setting(settings, "cargo_rows").unwrap_or(*cargo_rows as i64)
+                    as i32,
+                tech_rows: int_setting(settings, "tech_rows").unwrap_or(*tech_rows as i64) as i32,
+                panel_width: float_setting(settings, "panel_width").unwrap_or(*panel_width),
+            };
+            detour_store(&t);
+            // Boot runs once; a previous install in this process just
+            // gets fresh tuning.
+            if detour_installed() {
+                let at = hook_addr(t.pat, t.mask)?;
+                return Ok(detour_detail(&t, at));
+            }
+            let at = install_detour(&t)?;
+            Ok(detour_detail(&t, at))
+        }
     }
 }

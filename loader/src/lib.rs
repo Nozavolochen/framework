@@ -12,6 +12,7 @@ mod host;
 mod image;
 mod log;
 mod ops;
+mod overlay;
 mod patch;
 mod proxy;
 mod spec;
@@ -45,8 +46,19 @@ unsafe fn init(hinst: *mut c_void) {
     }
 
     proxy::load_real(&mut log);
+    log.line(&format!(
+        "loader: {} (build {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_ID")
+    ));
 
-    let mods = host::discover(&mut log);
+    match overlay::install(&mut log) {
+        Ok(detail) => log.line(&format!("overlay: {detail}")),
+        Err(e) => log.line(&format!("overlay: NOT INSTALLED - {e}")),
+    }
+
+    let snapshots = host::snapshot(&mut log);
+    let mods: Vec<crate::spec::Mod> = snapshots.into_iter().map(|s| s.spec).collect();
     let summary = mods
         .iter()
         .map(|p| format!("{}@{}", p.id, p.version))
@@ -62,14 +74,12 @@ unsafe fn init(hinst: *mut c_void) {
             continue;
         }
         for patch in &p.patches {
-            if let Some(f) = &patch.feature {
-                if !p.feature_on(f) {
-                    log.line(&format!("{}: disabled in config", patch.id));
-                    continue;
-                }
+            if !ops::patch_on(p, patch) {
+                log.line(&format!("{}: disabled in config", patch.id));
+                continue;
             }
             total += 1;
-            match ops::run(&patch.op, &mut log) {
+            match ops::run(patch, &p.settings, &mut log) {
                 Ok(detail) => {
                     done += 1;
                     log.line(&format!("{}: applied {detail}", patch.id));

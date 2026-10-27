@@ -7,12 +7,14 @@
 //! version = "0.1.0"
 //! enabled = true
 //!
-//! [features]
-//! first_patch = true
+//! [[setting]]
+//! id = "example-patch"   # matches a patch id: bool toggles it
+//! kind = "bool"
+//! label = "Apply the patch"
+//! default = true
 //!
 //! [[patch]]
 //! id = "example-patch"
-//! feature = "first_patch"   # optional: gate on a [features] key
 //! op = "force-branch"
 //! pattern = "48 3b df 0f 84 ?? ?? ?? ?? ..."
 //! offset = 15
@@ -55,11 +57,57 @@ pub enum Op {
     },
 }
 
+/// One `[[setting]]` entry: a tunable the overlay can show and
+/// the ops read live. `value` is the current choice; `default` is
+/// used when `value` is absent.
+#[derive(Debug, Clone)]
+pub struct Setting {
+    pub id: String,
+    pub kind: SettingKind,
+    pub label: String,
+    /// Explainer line under the row; empty hides it.
+    pub description: String,
+    pub default: String,
+    pub value: Option<String>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    pub choices: Vec<String>,
+}
+
+impl Setting {
+    /// Live value: the saved `value`, or `default` when absent.
+    pub fn current(&self) -> &str {
+        self.value.as_deref().unwrap_or(&self.default)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKind {
+    Bool,
+    Enum,
+    Float,
+    Int,
+    Text,
+}
+
+impl SettingKind {
+    fn from_key(key: &str) -> Option<Self> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "bool" => Some(Self::Bool),
+            "enum" => Some(Self::Enum),
+            "float" => Some(Self::Float),
+            "int" => Some(Self::Int),
+            "text" => Some(Self::Text),
+            _ => None,
+        }
+    }
+}
+
 /// One `[[patch]]` entry.
 #[derive(Debug, Clone)]
 pub struct Patch {
     pub id: String,
-    pub feature: Option<String>,
     pub op: Op,
 }
 
@@ -68,21 +116,13 @@ pub struct Patch {
 pub struct Mod {
     pub id: String,
     pub version: String,
+    /// Display name for the overlay; defaults to the id.
+    pub label: String,
+    /// One-line byline shown under the group header; empty hides it.
+    pub description: String,
     pub enabled: bool,
-    /// (key, value) from `[features]`; missing keys default to true.
-    pub features: Vec<(String, bool)>,
+    pub settings: Vec<Setting>,
     pub patches: Vec<Patch>,
-}
-
-impl Mod {
-    pub fn feature_on(&self, key: &str) -> bool {
-        for (k, v) in &self.features {
-            if k.eq_ignore_ascii_case(key) {
-                return *v;
-            }
-        }
-        true
-    }
 }
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -134,9 +174,63 @@ pub fn decode_bytes(s: &str) -> Result<Vec<u8>, String> {
 }
 
 #[derive(Default)]
+struct SettingBuilder {
+    id: Option<String>,
+    kind: Option<String>,
+    label: Option<String>,
+    description: Option<String>,
+    default: Option<String>,
+    value: Option<String>,
+    min: Option<f64>,
+    max: Option<f64>,
+    step: Option<f64>,
+    choices: Vec<String>,
+}
+
+impl SettingBuilder {
+    fn build(self) -> Result<Setting, String> {
+        let id = self.id.ok_or("setting without id")?;
+        let kind_key = self.kind.ok_or(format!("setting {id}: without kind"))?;
+        let kind = SettingKind::from_key(&kind_key).ok_or(format!(
+            "setting {id}: unknown kind {kind_key:?} (bool, enum, float, int, text)"
+        ))?;
+        if kind == SettingKind::Enum && self.choices.is_empty() {
+            return Err(format!("setting {id}: enum without choices"));
+        }
+        let default = self
+            .default
+            .ok_or(format!("setting {id}: without default"))?;
+        Ok(Setting {
+            id: id.clone(),
+            kind,
+            label: self.label.unwrap_or(id),
+            description: self.description.unwrap_or_default(),
+            default,
+            value: self.value,
+            min: self.min,
+            max: self.max,
+            step: self.step,
+            choices: self.choices,
+        })
+    }
+}
+
+fn parse_choices(v: &str) -> Vec<String> {
+    let t = v.trim();
+    let inner = t
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(t);
+    inner
+        .split(',')
+        .map(|c| unquote(c).trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+#[derive(Default)]
 struct PatchBuilder {
     id: Option<String>,
-    feature: Option<String>,
     op: Option<String>,
     pattern: Option<String>,
     offset: Option<usize>,
@@ -227,11 +321,7 @@ impl PatchBuilder {
             }
             other => return Err(format!("patch {id}: unknown op {other:?}")),
         };
-        Ok(Patch {
-            id,
-            feature: self.feature,
-            op,
-        })
+        Ok(Patch { id, op })
     }
 }
 
@@ -239,17 +329,34 @@ fn parse_num<T: std::str::FromStr>(v: &str) -> Option<T> {
     v.trim().parse().ok()
 }
 
+/// Strip `#`/`;` comments, keeping quoted text intact. A naive
+/// split would chop values like `"a; b"` mid-string.
+fn strip_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    for (i, c) in line.char_indices() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && (c == '#' || c == ';') {
+            return line[..i].trim_end();
+        }
+    }
+    line
+}
+
 /// Parse one `mod.toml` document. Unknown keys are ignored so old
 /// specs keep loading when new optional keys appear.
 pub fn parse_mod(text: &str) -> Result<Mod, String> {
     let mut id = String::new();
     let mut version = String::new();
+    let mut label = String::new();
+    let mut description = String::new();
     let mut enabled = true;
-    let mut features: Vec<(String, bool)> = Vec::new();
+    let mut settings: Vec<Setting> = Vec::new();
     let mut patches: Vec<Patch> = Vec::new();
     let mut cur: Option<PatchBuilder> = None;
-    // None = outside, Some(false) = [mod], Some(true) = [features].
-    let mut in_features = false;
+    let mut cur_setting: Option<SettingBuilder> = None;
+    // Outside, [mod], or inside a [[patch]] / [[setting]] block.
+    // Any other section header is ignored, with its keys.
     let mut in_mod = false;
 
     let mut flush = |cur: &mut Option<PatchBuilder>| -> Result<(), String> {
@@ -259,20 +366,35 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         Ok(())
     };
 
+    let mut flush_setting = |cur: &mut Option<SettingBuilder>| -> Result<(), String> {
+        if let Some(b) = cur.take() {
+            settings.push(b.build()?);
+        }
+        Ok(())
+    };
+
     for raw in text.lines() {
-        let line = raw.split(['#', ';']).next().unwrap_or("").trim();
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
         if line.starts_with('[') {
             if line.eq_ignore_ascii_case("[[patch]]") {
                 flush(&mut cur)?;
+                flush_setting(&mut cur_setting)?;
                 cur = Some(PatchBuilder::default());
                 in_mod = false;
                 continue;
             }
+            if line.eq_ignore_ascii_case("[[setting]]") {
+                flush(&mut cur)?;
+                flush_setting(&mut cur_setting)?;
+                cur_setting = Some(SettingBuilder::default());
+                in_mod = false;
+                continue;
+            }
             flush(&mut cur)?;
-            in_features = line.eq_ignore_ascii_case("[features]");
+            flush_setting(&mut cur_setting)?;
             in_mod = line.eq_ignore_ascii_case("[mod]");
             continue;
         }
@@ -280,10 +402,25 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
             continue;
         };
         let key = k.trim().to_ascii_lowercase();
+        if let Some(s) = cur_setting.as_mut() {
+            match key.as_str() {
+                "id" => s.id = Some(unquote(v)),
+                "kind" => s.kind = Some(unquote(v)),
+                "label" => s.label = Some(unquote(v)),
+                "description" => s.description = Some(unquote(v)),
+                "default" => s.default = Some(unquote(v)),
+                "value" => s.value = Some(unquote(v)),
+                "min" => s.min = parse_num(v),
+                "max" => s.max = parse_num(v),
+                "step" => s.step = parse_num(v),
+                "choices" => s.choices = parse_choices(v),
+                _ => {}
+            }
+            continue;
+        }
         if let Some(b) = cur.as_mut() {
             match key.as_str() {
                 "id" => b.id = Some(unquote(v)),
-                "feature" => b.feature = Some(unquote(v)),
                 "op" => b.op = Some(unquote(v)),
                 "pattern" => b.pattern = Some(unquote(v)),
                 "offset" => b.offset = parse_num(v),
@@ -302,6 +439,8 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
             match key.as_str() {
                 "id" => id = unquote(v),
                 "version" => version = unquote(v),
+                "label" => label = unquote(v),
+                "description" => description = unquote(v),
                 "enabled" => {
                     if let Some(b) = parse_bool(v) {
                         enabled = b;
@@ -309,21 +448,178 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
                 }
                 _ => {}
             }
-        } else if in_features {
-            if let Some(b) = parse_bool(v) {
-                features.push((key, b));
-            }
         }
     }
     flush(&mut cur)?;
+    flush_setting(&mut cur_setting)?;
     if id.is_empty() {
         return Err("mod without [mod] id".into());
     }
     Ok(Mod {
-        id,
+        id: id.clone(),
         version,
+        label: if label.is_empty() { id } else { label },
+        description,
         enabled,
-        features,
+        settings,
         patches,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXAMPLE_TOML: &str = r#"
+[mod]
+id = "eu.savagecore.example_mod"
+version = "0.0.0"
+label = "Example Mod"
+enabled = true
+
+[[setting]]
+id = "mode"
+kind = "enum"
+label = "Mode"
+choices = ["volume", "area", "linear", "off"]
+default = "volume"
+value = "area"
+
+[[setting]]
+id = "factor"
+kind = "float"
+label = "Factor"
+default = 1.0
+min = 0.25
+max = 4.0
+step = 0.25
+value = 2.0
+
+[[setting]]
+id = "count"
+kind = "int"
+label = "Count"
+default = 64
+min = 1
+max = 512
+value = 128
+
+[[patch]]
+id = "example-patch"
+op = "write-bytes"
+pattern = "48 3b df 0f 84 ?? ?? ?? ??"
+offset = 15
+expect = "0f 84"
+bytes = "66 0f 1f 44 00 00"
+"#;
+
+    fn setting<'a>(m: &'a Mod, id: &str) -> &'a Setting {
+        m.settings.iter().find(|s| s.id == id).unwrap()
+    }
+
+    #[test]
+    fn mod_label_parsed_with_id_fallback() {
+        let m = parse_mod(EXAMPLE_TOML).unwrap();
+        assert_eq!(m.label, "Example Mod");
+        let toml = EXAMPLE_TOML.replace("label = \"Example Mod\"\n", "");
+        let m = parse_mod(&toml).unwrap();
+        assert_eq!(m.label, m.id);
+    }
+
+    #[test]
+    fn mod_description_parsed_empty_by_default() {
+        let m = parse_mod(EXAMPLE_TOML).unwrap();
+        assert_eq!(m.description, "");
+        let toml = EXAMPLE_TOML.replace(
+            "label = \"Example Mod\"\n",
+            "label = \"Example Mod\"\ndescription = \"Test byline.\"\n",
+        );
+        let m = parse_mod(&toml).unwrap();
+        assert_eq!(m.description, "Test byline.");
+    }
+
+    #[test]
+    fn setting_description_parsed_empty_by_default() {
+        let m = parse_mod(EXAMPLE_TOML).unwrap();
+        assert!(m.settings.iter().all(|s| s.description.is_empty()));
+        let toml = EXAMPLE_TOML.replace(
+            "label = \"Mode\"\n",
+            "label = \"Mode\"\ndescription = \"How it scales.\"\n",
+        );
+        let m = parse_mod(&toml).unwrap();
+        assert_eq!(setting(&m, "mode").description, "How it scales.");
+    }
+
+    #[test]
+    fn semicolons_inside_quotes_survive() {
+        let toml = "[mod]\nid = \"x\"\n[other]\n[[setting]]\nid = \"s\"\nkind = \"text\"\nlabel = \"L\"\ndescription = \"a; b # c\"\ndefault = \"d\"\n";
+        let m = parse_mod(toml).unwrap();
+        assert_eq!(m.settings[0].description, "a; b # c");
+        // A real trailing comment still strips; unknown sections are ignored.
+        let toml = "[mod]\nid = \"x\" # game mod\n[features]\nold_flag = true\n";
+        let m = parse_mod(toml).unwrap();
+        assert_eq!(m.id, "x");
+    }
+
+    #[test]
+    fn write_bytes_parses() {
+        let m = parse_mod(EXAMPLE_TOML).unwrap();
+        assert_eq!(m.id, "eu.savagecore.example_mod");
+        assert!(m.enabled);
+        assert_eq!(m.patches.len(), 1);
+        let p = &m.patches[0];
+        assert_eq!(p.id, "example-patch");
+        assert!(matches!(p.op, Op::WriteBytes { .. }));
+        assert_eq!(m.settings.len(), 3);
+        let md = setting(&m, "mode");
+        assert_eq!(md.kind, SettingKind::Enum);
+        assert_eq!(md.choices, vec!["volume", "area", "linear", "off"]);
+        assert_eq!(md.default, "volume");
+        assert_eq!(md.value.as_deref(), Some("area"));
+        let fc = setting(&m, "factor");
+        assert_eq!(fc.kind, SettingKind::Float);
+        assert_eq!(fc.value.as_deref(), Some("2.0"));
+        assert_eq!(fc.min, Some(0.25));
+        assert_eq!(fc.max, Some(4.0));
+        assert_eq!(fc.step, Some(0.25));
+        let ct = setting(&m, "count");
+        assert_eq!(ct.kind, SettingKind::Int);
+        assert_eq!(ct.value.as_deref(), Some("128"));
+    }
+
+    #[test]
+    fn settings_reject_bad_schema() {
+        // Unknown kind.
+        let toml = EXAMPLE_TOML.replace("kind = \"enum\"", "kind = \"slider\"");
+        assert!(parse_mod(&toml).is_err());
+        // Enum without choices.
+        let toml = EXAMPLE_TOML.replace(
+            "choices = [\"volume\", \"area\", \"linear\", \"off\"]",
+            "choices = []",
+        );
+        assert!(parse_mod(&toml).is_err());
+        // Missing id.
+        let toml = EXAMPLE_TOML.replace("id = \"mode\"\n", "");
+        assert!(parse_mod(&toml).is_err());
+        // Missing kind.
+        let toml = EXAMPLE_TOML.replace("kind = \"float\"\n", "");
+        assert!(parse_mod(&toml).is_err());
+        // Missing default.
+        let toml = EXAMPLE_TOML.replace("default = 64\n", "");
+        assert!(parse_mod(&toml).is_err());
+    }
+
+    #[test]
+    fn write_bytes_needs_pattern_and_bytes() {
+        for key in ["pattern", "bytes"] {
+            let toml = EXAMPLE_TOML.replace(&format!("{key} = "), "# ");
+            assert!(parse_mod(&toml).is_err(), "accepted without {key}");
+        }
+    }
+
+    #[test]
+    fn unknown_op_still_rejected() {
+        let toml = EXAMPLE_TOML.replace("write-bytes", "no-such-op");
+        assert!(parse_mod(&toml).is_err());
+    }
 }

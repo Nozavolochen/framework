@@ -7,6 +7,50 @@ pub struct Log {
     lines: Vec<String>,
 }
 
+/// Consolidated log directory: `<game>/Binaries/nozavolochen/`,
+/// created on first use. Every host and mod log lives here so
+/// Binaries itself stays clean.
+pub fn dir() -> Option<String> {
+    use windows_sys::Win32::Foundation::MAX_PATH;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
+    unsafe {
+        let mut buf = [0u8; MAX_PATH as usize];
+        let n = GetModuleFileNameA(std::ptr::null_mut(), buf.as_mut_ptr(), MAX_PATH as u32);
+        if n == 0 {
+            return None;
+        }
+        let mut path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+        let sep = path.rfind(['/', '\\'])?;
+        path.truncate(sep + 1);
+        path.push_str("nozavolochen");
+        let _ = std::fs::create_dir_all(&path);
+        Some(path)
+    }
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.ends_with(['/', '\\']) {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Append one line to a log in the consolidated directory.
+pub fn append(name: &str, line: &str) {
+    if let Some(d) = dir() {
+        let path = join(&d, name);
+        let text = format!("{line}\n");
+        if let Ok(existing) = std::fs::read(&path) {
+            let mut prev = String::from_utf8_lossy(&existing).into_owned();
+            prev.push_str(&text);
+            let _ = std::fs::write(&path, prev);
+        } else {
+            let _ = std::fs::write(&path, text);
+        }
+    }
+}
+
 impl Log {
     pub fn new(name: &str) -> Self {
         Self {
@@ -46,23 +90,10 @@ impl Log {
         self.lines.push(format!("  {s}"));
     }
 
-    /// Write nozavolochen.log next to our DLL.
-    pub fn write_beside(&self, hinst: *mut c_void) {
-        use windows_sys::Win32::Foundation::MAX_PATH;
-        use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
-        unsafe {
-            let mut buf = [0u8; MAX_PATH as usize];
-            let n = GetModuleFileNameA(hinst, buf.as_mut_ptr(), MAX_PATH as u32);
-            if n == 0 {
-                return;
-            }
-            let mut path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-            if let Some(sep) = path.rfind(['/', '\\']) {
-                path.truncate(sep + 1);
-            } else {
-                path.clear();
-            }
-            path.push_str("nozavolochen.log");
+    /// Write nozavolochen.log into the consolidated log directory.
+    pub fn write_beside(&self, _hinst: *mut c_void) {
+        if let Some(d) = dir() {
+            let path = join(&d, "nozavolochen.log");
             let text = self.lines.join("\r\n") + "\r\n";
             let _ = std::fs::write(&path, text);
         }

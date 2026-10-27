@@ -8,8 +8,11 @@
 use crate::log::Log;
 use crate::spec::{parse_mod, Mod};
 
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
 /// `<game>/GAMEDATA/MODS`, derived from the host exe in `<game>/Binaries`.
-fn mods_dir() -> Option<String> {
+pub(crate) fn mods_dir() -> Option<String> {
     use windows_sys::Win32::Foundation::MAX_PATH;
     use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
     unsafe {
@@ -58,14 +61,38 @@ fn subdirs(dir: &str) -> Vec<String> {
     out
 }
 
-pub fn discover(log: &mut Log) -> Vec<Mod> {
-    let mut mods: Vec<Mod> = Vec::new();
+/// One loaded mod folder with the mod.toml mtime it was read at.
+pub struct Snapshot {
+    folder: String,
+    mtime: Option<SystemTime>,
+    pub spec: Mod,
+}
+
+static KNOWN: OnceLock<Mutex<Vec<Snapshot>>> = OnceLock::new();
+
+fn mod_path(folder: &str) -> Option<String> {
+    let dir = mods_dir()?;
+    let sep = if dir.contains('\\') { "\\" } else { "/" };
+    Some(format!("{dir}{sep}{folder}{sep}mod.toml"))
+}
+
+fn file_mtime(path: &str) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Load every mod folder (as discover did) and remember each
+/// folder's mod.toml mtime for live reload.
+pub fn snapshot(log: &mut Log) -> Vec<Snapshot> {
+    let mut out: Vec<Snapshot> = Vec::new();
     let Some(dir) = mods_dir() else {
         log.line("mods: host path unknown, no mods loaded");
-        return mods;
+        return out;
     };
     for sub in subdirs(&dir) {
-        let path = format!("{dir}\\{sub}\\mod.toml");
+        let path = match mod_path(&sub) {
+            Some(p) => p,
+            None => continue,
+        };
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -76,14 +103,123 @@ pub fn discover(log: &mut Log) -> Vec<Mod> {
                     "mod {} {}: spec loaded from MODS\\{sub}",
                     p.id, p.version
                 ));
-                if let Some(slot) = mods.iter_mut().find(|e| e.id == p.id) {
-                    *slot = p;
+                let snap = Snapshot {
+                    folder: sub,
+                    mtime: file_mtime(&path),
+                    spec: p,
+                };
+                if let Some(slot) = out.iter_mut().find(|e| e.spec.id == snap.spec.id) {
+                    *slot = snap;
                 } else {
-                    mods.push(p);
+                    out.push(snap);
                 }
             }
             Err(e) => log.line(&format!("MODS\\{sub}: mod.toml NOT LOADED - {e}")),
         }
     }
-    mods
+    let _ = KNOWN.set(Mutex::new(
+        out.iter()
+            .map(|s| Snapshot {
+                folder: s.folder.clone(),
+                mtime: s.mtime,
+                spec: s.spec.clone(),
+            })
+            .collect(),
+    ));
+    out
+}
+
+/// (mod id, folder) for every loaded mod, for write-back.
+pub fn folder_map() -> Vec<(String, String)> {
+    let Some(known) = KNOWN.get() else {
+        return Vec::new();
+    };
+    let Ok(guard) = known.lock() else {
+        return Vec::new();
+    };
+    guard
+        .iter()
+        .map(|s| (s.spec.id.clone(), s.folder.clone()))
+        .collect()
+}
+
+/// The currently loaded mod specs, for overlay row building.
+pub fn current_mods() -> Vec<Mod> {
+    let Some(known) = KNOWN.get() else {
+        return Vec::new();
+    };
+    let Ok(guard) = known.lock() else {
+        return Vec::new();
+    };
+    guard.iter().map(|s| s.spec.clone()).collect()
+}
+
+/// Re-read any mod.toml whose mtime moved and push changed tuning
+/// into the applied patches. Patterns never re-resolve live: only
+/// tuning keys travel this path, and a failed re-parse keeps the old
+/// tuning. Called from the present hook every couple of seconds.
+/// Returns true when any snapshot changed (callers rebuild UI rows).
+pub fn poll_reload() -> bool {
+    poll_impl(true)
+}
+
+/// Same as poll_reload without success lines: the overlay calls this
+/// right after writing a value, so per-step successes stay quiet
+/// while failures still log.
+pub fn poll_reload_quiet() -> bool {
+    poll_impl(false)
+}
+
+fn poll_impl(loud: bool) -> bool {
+    let Some(known) = KNOWN.get() else {
+        return false;
+    };
+    let Ok(mut guard) = known.lock() else {
+        return false;
+    };
+    let mut changed = false;
+    for snap in guard.iter_mut() {
+        let Some(path) = mod_path(&snap.folder) else {
+            continue;
+        };
+        let mtime = file_mtime(&path);
+        if mtime == snap.mtime {
+            continue;
+        }
+        // Record the new mtime even when the re-parse fails, so one
+        // bad edit logs once instead of spamming every poll.
+        snap.mtime = mtime;
+        changed = true;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        match parse_mod(&text) {
+            Ok(spec) => {
+                for patch in &spec.patches {
+                    let enabled = crate::ops::patch_on(&spec, patch);
+                    let outcome = crate::ops::retune(patch, &spec.settings, enabled);
+                    // Overlay-driven reloads stay quiet on success (the
+                    // panel already shows the value); failures always log.
+                    if loud || outcome.is_err() {
+                        let line = match outcome {
+                            Ok(detail) => {
+                                format!("  MODS\\{}: {} reloaded - {detail}", snap.folder, patch.id)
+                            }
+                            Err(e) => {
+                                format!("  MODS\\{}: {} NOT UPDATED - {e}", snap.folder, patch.id)
+                            }
+                        };
+                        crate::log::append("nozavolochen.log", &line);
+                    }
+                }
+                snap.spec = spec;
+            }
+            Err(e) => crate::log::append(
+                "nozavolochen.log",
+                &format!("  MODS\\{}: mod.toml NOT RELOADED - {e}", snap.folder),
+            ),
+        }
+    }
+    changed
 }
