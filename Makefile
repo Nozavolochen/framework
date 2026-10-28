@@ -4,8 +4,9 @@
 #   make dist       pack the framework release zip
 #   make assets     regenerate the Nexus page images (header + main)
 #   make lang-check verify loader/strings/*.json (keys, lengths, codes)
-#   make check      repo checks for the pre-push hook (lang-check; spec
-#                   verification lives with the mods, see above)
+#   make check      repo checks for the pre-push hook: strings JSON plus
+#                   the strings unit tests (spec verification lives with
+#                   the mods, see above)
 #   make clean      drop build outputs
 #
 # Spec verification lives with the mods: each mod runs
@@ -51,3 +52,4 @@ lang-check:
 	python3 tools/check_strings.py
 
 check: lang-check
+	@cd loader && cargo test -q -p nozavolochen-strings

@@ -29,8 +29,10 @@ language is read from `Binaries/SETTINGS/GCUSERSETTINGSDATA.MXML` (Steam
 break detection.
 
 `loader/strings` is the Weblate component root: translators edit the JSON
-there, never Rust. A new language ships by adding its file plus one line in
-`EXTRA` in `loader/src/strings.rs`.
+there, never Rust. A new file there ships in the next DLL build with no
+Rust edit. The `nozavolochen-strings` crate (`loader/crates/strings`) holds
+the lookup with English fallback plus the game-language detection, and its
+unit tests run on the host:
 
 ```sh
 make lang-check   # keys, value lengths, language codes

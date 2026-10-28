@@ -24,7 +24,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::log::Log;
 use crate::spec::{Mod, Setting, SettingKind};
-use crate::strings::Strings;
+
+use nozavolochen_strings::Strings;
 
 /// Backtick: the overlay key.
 const VK_OEM_3: i32 = 0xC0;
@@ -1040,7 +1041,7 @@ impl Overlay {
         // Cheap (one small file read): the player may have changed the
         // language since the last open.
         let (lang, how) = match crate::host::game_root() {
-            Some(root) => crate::strings::detect_in(&root),
+            Some(root) => nozavolochen_strings::detect_in(&root),
             None => ("en", "fallback"),
         };
         crate::log::append(
