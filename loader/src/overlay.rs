@@ -29,6 +29,12 @@ use crate::spec::{Mod, Setting, SettingKind};
 const VK_OEM_3: i32 = 0xC0;
 const VK_SHIFT: i32 = 0x10;
 
+/// UTF-8 overlay text as NUL-terminated UTF-16 for the W drawing
+/// calls. Rust strings are always valid UTF-8, so this cannot fail.
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 /// Re-check mod.toml mtimes every two seconds while presenting.
 const RELOAD_MS: u64 = 2000;
 /// Input thread poll interval: fast enough to catch quick taps.
@@ -122,12 +128,13 @@ impl Row {
 
     fn display(&self) -> String {
         let cur = self.current();
+        let (lang, _) = crate::locale::current();
         match self.setting.kind {
             SettingKind::Bool => {
                 if cur.trim().eq_ignore_ascii_case("true") || cur.trim() == "1" {
-                    "on".into()
+                    crate::locale::chrome(&lang, "on").to_string()
                 } else {
-                    "off".into()
+                    crate::locale::chrome(&lang, "off").to_string()
                 }
             }
             SettingKind::Float => match cur.parse::<f64>() {
@@ -430,7 +437,7 @@ impl Overlay {
             return;
         }
         if crate::host::poll_reload_quiet() {
-            self.rebuild(&crate::host::current_mods());
+            self.rebuild(&crate::locale::localized_mods());
         }
         self.prune_pending();
     }
@@ -918,7 +925,7 @@ fn maybe_poll_reload() {
             LAST_POLL_MS = now;
             if crate::host::poll_reload() {
                 if let Ok(mut st) = ui().try_lock() {
-                    st.rebuild(&crate::host::current_mods());
+                    st.rebuild(&crate::locale::localized_mods());
                 }
             }
         }
@@ -1034,7 +1041,14 @@ impl Overlay {
         self.game_hwnd = 0;
         self.editing = None;
         self.selected = 0;
-        self.rebuild(&crate::host::current_mods());
+        // Cheap (two small file reads): NMS hot-applies language
+        // changes, so re-resolve on every open.
+        let (lang, source) = crate::locale::refresh();
+        crate::log::append(
+            "nozavolochen.log",
+            &format!("overlay: language {lang} ({source})"),
+        );
+        self.rebuild(&crate::locale::localized_mods());
         self.sync_window(foreground_window().unwrap_or(0));
         self.dirty = true;
         self.paint();
@@ -1121,7 +1135,7 @@ impl Overlay {
     /// One footer line of (key, action) pairs: keys amber, actions gray.
     fn draw_footer_line(&self, hdc: *mut c_void, y: i32, pairs: &[(&str, &str)]) {
         use windows_sys::Win32::Foundation::{RECT, SIZE};
-        use windows_sys::Win32::Graphics::Gdi::{DrawTextA, GetTextExtentPoint32A, SetTextColor};
+        use windows_sys::Win32::Graphics::Gdi::{DrawTextW, GetTextExtentPoint32W, SetTextColor};
         unsafe {
             let mut x = 16;
             for (key, action) in pairs {
@@ -1133,8 +1147,8 @@ impl Overlay {
                     right: w - 16,
                     bottom: y + 22,
                 };
-                let ktext = format!("{key}\0");
-                DrawTextA(
+                let ktext = wide(key);
+                DrawTextW(
                     hdc,
                     ktext.as_ptr(),
                     -1,
@@ -1142,7 +1156,7 @@ impl Overlay {
                     0x00000000 | 0x00000020 | 0x00000800,
                 );
                 let mut ext = SIZE { cx: 0, cy: 0 };
-                GetTextExtentPoint32A(hdc, ktext.as_ptr(), key.len() as i32, &mut ext);
+                GetTextExtentPoint32W(hdc, ktext.as_ptr(), (ktext.len() - 1) as i32, &mut ext);
                 x += ext.cx;
                 SetTextColor(hdc, 0x00909090);
                 let mut arc = RECT {
@@ -1151,15 +1165,15 @@ impl Overlay {
                     right: w - 16,
                     bottom: y + 22,
                 };
-                let atext = format!("{action}\0");
-                DrawTextA(
+                let atext = wide(action);
+                DrawTextW(
                     hdc,
                     atext.as_ptr(),
                     -1,
                     &mut arc,
                     0x00000000 | 0x00000020 | 0x00000800,
                 );
-                GetTextExtentPoint32A(hdc, atext.as_ptr(), action.len() as i32, &mut ext);
+                GetTextExtentPoint32W(hdc, atext.as_ptr(), (atext.len() - 1) as i32, &mut ext);
                 x += ext.cx;
             }
         }
@@ -1192,7 +1206,8 @@ impl Overlay {
                 return;
             }
             let mkfont = |weight: i32| {
-                CreateFontA(
+                let face = wide("Consolas");
+                CreateFontW(
                     -16,
                     0,
                     0,
@@ -1206,7 +1221,7 @@ impl Overlay {
                     0,
                     0,
                     0,
-                    b"Consolas\0".as_ptr(),
+                    face.as_ptr(),
                 )
             };
             let regular = mkfont(400);
@@ -1232,9 +1247,9 @@ impl Overlay {
                 right: w - 16,
                 bottom: 38,
             };
-            DrawTextA(
+            DrawTextW(
                 hdc,
-                b"Nozavolochen\0".as_ptr(),
+                wide("Nozavolochen").as_ptr(),
                 -1,
                 &mut rc,
                 0x00000000 | 0x00000020 | 0x00000800,
@@ -1265,13 +1280,13 @@ impl Overlay {
                             bottom: y + 26,
                         };
                         let marker = if group.collapsed { "[+]" } else { "[-]" };
-                        let text = format!(
-                            "{}{} {}\0",
+                        let text = wide(&format!(
+                            "{}{} {}",
                             if n == self.selected { "> " } else { "  " },
                             marker,
                             group.label
-                        );
-                        DrawTextA(
+                        ));
+                        DrawTextW(
                             hdc,
                             text.as_ptr(),
                             -1,
@@ -1290,8 +1305,8 @@ impl Overlay {
                                 right: w - 16,
                                 bottom: y + 44,
                             };
-                            let dtext = format!("{}\0", group.description);
-                            DrawTextA(
+                            let dtext = wide(&group.description);
+                            DrawTextW(
                                 hdc,
                                 dtext.as_ptr(),
                                 -1,
@@ -1340,8 +1355,8 @@ impl Overlay {
                             right: w - 20,
                             bottom: y + 26,
                         };
-                        let label_text = format!("{}{}:\0", marker, row.setting.label);
-                        DrawTextA(
+                        let label_text = wide(&format!("{}{}:", marker, row.setting.label));
+                        DrawTextW(
                             hdc,
                             label_text.as_ptr(),
                             -1,
@@ -1350,15 +1365,21 @@ impl Overlay {
                         );
                         // Value right-aligned.
                         let mut ext = SIZE { cx: 0, cy: 0 };
-                        GetTextExtentPoint32A(hdc, val.as_ptr(), val.len() as i32, &mut ext);
+                        let valw = wide(&val);
+                        GetTextExtentPoint32W(
+                            hdc,
+                            valw.as_ptr(),
+                            (valw.len() - 1) as i32,
+                            &mut ext,
+                        );
                         let mut vrc = RECT {
                             left: w - 20 - ext.cx,
                             top: y,
                             right: w - 20,
                             bottom: y + 26,
                         };
-                        let vtext = format!("{val}\0");
-                        DrawTextA(
+                        let vtext = wide(&val);
+                        DrawTextW(
                             hdc,
                             vtext.as_ptr(),
                             -1,
@@ -1374,8 +1395,8 @@ impl Overlay {
                                 right: w - 16,
                                 bottom: y + 44,
                             };
-                            let dtext = format!("{}\0", row.setting.description);
-                            DrawTextA(
+                            let dtext = wide(&row.setting.description);
+                            DrawTextW(
                                 hdc,
                                 dtext.as_ptr(),
                                 -1,
@@ -1387,19 +1408,29 @@ impl Overlay {
                     }
                 }
             }
-            // Footer: keys amber, actions gray.
+            // Footer: keys amber, actions gray. Key names are keyboard
+            // labels and stay untranslated; actions come from chrome.
+            let (lang, _) = crate::locale::current();
+            let c = |key: &str| crate::locale::chrome(&lang, key);
             self.draw_footer_line(
                 hdc,
                 h - 56,
                 &[
-                    ("up/down", " select  "),
-                    ("left/right", " adjust  "),
-                    ("enter", " ok  "),
-                    ("del", " reset  "),
-                    ("esc", " close"),
+                    ("up/down", &format!(" {}  ", c("select"))),
+                    ("left/right", &format!(" {}  ", c("adjust"))),
+                    ("enter", &format!(" {}  ", c("ok"))),
+                    ("del", &format!(" {}  ", c("reset"))),
+                    ("esc", &format!(" {}", c("close"))),
                 ],
             );
-            self.draw_footer_line(hdc, h - 30, &[("esc", " close  "), ("`", " close")]);
+            self.draw_footer_line(
+                hdc,
+                h - 30,
+                &[
+                    ("esc", &format!(" {}  ", c("close"))),
+                    ("`", &format!(" {}", c("close"))),
+                ],
+            );
             DeleteObject(regular);
             DeleteObject(bold);
             ReleaseDC(self.hwnd as HWND, hdc);

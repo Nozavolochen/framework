@@ -11,6 +11,9 @@ Checks, per [[patch]]:
 - page-size-override: anchors present as NUL-terminated ASCII with
   unique xrefs; NEXT_PAGE / PREV_PAGE step patterns unique in .text.
 
+Also checks every [[mod.text]] / [[setting.text]] block carries a
+non-empty lang (translations themselves are not verified).
+
 Usage: python3 tools/check_specs.py [NMS.exe] [mods dir]
 Verifies the mod.toml specs in the given dir (defaults to the local
 Steam install and the current dir).
@@ -84,8 +87,9 @@ def read_i32(blob, o):
 
 
 def parse_mod(path):
-    mod = {"id": None, "features": {}, "patches": []}
+    mod = {"id": None, "features": {}, "patches": [], "texts": []}
     cur = None
+    cur_text = None
     section = None
     for raw in open(path).read().splitlines():
         line = raw.split("#")[0].split(";")[0].strip()
@@ -96,11 +100,17 @@ def parse_mod(path):
                 if cur:
                     mod["patches"].append(cur)
                 cur = {}
+                cur_text = None
                 section = "patch"
+            elif line.lower() in ("[[setting.text]]", "[[mod.text]]"):
+                cur_text = {}
+                mod["texts"].append(cur_text)
+                section = "text"
             else:
                 if cur:
                     mod["patches"].append(cur)
                     cur = None
+                cur_text = None
                 section = line.strip("[]").lower()
             continue
         if "=" not in line:
@@ -113,6 +123,8 @@ def parse_mod(path):
             mod["features"][k.lower()] = v.lower() in ("true", "1", "yes", "on")
         elif section == "patch" and cur is not None:
             cur[k] = v
+        elif section == "text" and cur_text is not None:
+            cur_text[k] = v
     if cur:
         mod["patches"].append(cur)
     return mod
@@ -177,6 +189,15 @@ def main():
             continue
         mod = parse_mod(os.path.join(moddir, fname))
         print(f"== {mod['id']} ({fname})")
+        try:
+            for t in mod["texts"]:
+                assert t.get("lang", "").strip(), "text block without lang"
+            if mod["texts"]:
+                langs = sorted({t["lang"].strip().lower() for t in mod["texts"]})
+                print(f"  texts: OK {len(mod['texts'])} block(s), langs {','.join(langs)}")
+        except AssertionError as e:
+            print(f"  texts: FAIL {e}")
+            failures += 1
         for p in mod["patches"]:
             pid, op = p.get("id", "?"), p.get("op", "?")
             try:

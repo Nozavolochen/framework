@@ -57,6 +57,17 @@ pub enum Op {
     },
 }
 
+/// One translated label/description pair: a `[[mod.text]]` or
+/// `[[setting.text]]` block. `lang` is a lowercase BCP 47 primary
+/// tag (`nl`, `de`, `zh`). Empty label/description keeps the source
+/// string for that field.
+#[derive(Debug, Clone)]
+pub struct TextEntry {
+    pub lang: String,
+    pub label: String,
+    pub description: String,
+}
+
 /// One `[[setting]]` entry: a tunable the overlay can show and
 /// the ops read live. `value` is the current choice; `default` is
 /// used when `value` is absent.
@@ -73,6 +84,7 @@ pub struct Setting {
     pub max: Option<f64>,
     pub step: Option<f64>,
     pub choices: Vec<String>,
+    pub texts: Vec<TextEntry>,
 }
 
 impl Setting {
@@ -123,6 +135,7 @@ pub struct Mod {
     pub enabled: bool,
     pub settings: Vec<Setting>,
     pub patches: Vec<Patch>,
+    pub texts: Vec<TextEntry>,
 }
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -174,6 +187,28 @@ pub fn decode_bytes(s: &str) -> Result<Vec<u8>, String> {
 }
 
 #[derive(Default)]
+struct TextBuilder {
+    lang: Option<String>,
+    label: Option<String>,
+    description: Option<String>,
+}
+
+impl TextBuilder {
+    fn build(self, owner: &str) -> Result<TextEntry, String> {
+        let lang = self.lang.ok_or(format!("{owner}: text without lang"))?;
+        let lang = lang.trim().to_lowercase();
+        if lang.is_empty() {
+            return Err(format!("{owner}: text without lang"));
+        }
+        Ok(TextEntry {
+            lang,
+            label: self.label.unwrap_or_default(),
+            description: self.description.unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Default)]
 struct SettingBuilder {
     id: Option<String>,
     kind: Option<String>,
@@ -185,6 +220,7 @@ struct SettingBuilder {
     max: Option<f64>,
     step: Option<f64>,
     choices: Vec<String>,
+    texts: Vec<TextBuilder>,
 }
 
 impl SettingBuilder {
@@ -200,6 +236,10 @@ impl SettingBuilder {
         let default = self
             .default
             .ok_or(format!("setting {id}: without default"))?;
+        let mut texts = Vec::with_capacity(self.texts.len());
+        for t in self.texts {
+            texts.push(t.build(&format!("setting {id}"))?);
+        }
         Ok(Setting {
             id: id.clone(),
             kind,
@@ -211,6 +251,7 @@ impl SettingBuilder {
             max: self.max,
             step: self.step,
             choices: self.choices,
+            texts,
         })
     }
 }
@@ -355,6 +396,11 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
     let mut patches: Vec<Patch> = Vec::new();
     let mut cur: Option<PatchBuilder> = None;
     let mut cur_setting: Option<SettingBuilder> = None;
+    let mut cur_text: Option<TextBuilder> = None;
+    // Whether a pending [[mod.text]] / [[setting.text]] block belongs
+    // to the mod (true) or the current setting (false).
+    let mut text_is_mod = false;
+    let mut mod_texts: Vec<TextBuilder> = Vec::new();
     // Outside, [mod], or inside a [[patch]] / [[setting]] block.
     // Any other section header is ignored, with its keys.
     let mut in_mod = false;
@@ -373,6 +419,25 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         Ok(())
     };
 
+    // Move a pending text block into its parent builder / list.
+    let flush_text = |cur_setting: &mut Option<SettingBuilder>,
+                      mod_texts: &mut Vec<TextBuilder>,
+                      cur_text: &mut Option<TextBuilder>,
+                      text_is_mod: &mut bool|
+     -> Result<(), String> {
+        if let Some(t) = cur_text.take() {
+            if *text_is_mod {
+                mod_texts.push(t);
+            } else {
+                match cur_setting.as_mut() {
+                    Some(s) => s.texts.push(t),
+                    None => return Err("text outside [[mod]] or [[setting]]".into()),
+                }
+            }
+        }
+        Ok(())
+    };
+
     for raw in text.lines() {
         let line = strip_comment(raw).trim();
         if line.is_empty() {
@@ -380,6 +445,12 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         }
         if line.starts_with('[') {
             if line.eq_ignore_ascii_case("[[patch]]") {
+                flush_text(
+                    &mut cur_setting,
+                    &mut mod_texts,
+                    &mut cur_text,
+                    &mut text_is_mod,
+                )?;
                 flush(&mut cur)?;
                 flush_setting(&mut cur_setting)?;
                 cur = Some(PatchBuilder::default());
@@ -387,12 +458,51 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
                 continue;
             }
             if line.eq_ignore_ascii_case("[[setting]]") {
+                flush_text(
+                    &mut cur_setting,
+                    &mut mod_texts,
+                    &mut cur_text,
+                    &mut text_is_mod,
+                )?;
                 flush(&mut cur)?;
                 flush_setting(&mut cur_setting)?;
                 cur_setting = Some(SettingBuilder::default());
                 in_mod = false;
                 continue;
             }
+            if line.eq_ignore_ascii_case("[[mod.text]]") {
+                flush_text(
+                    &mut cur_setting,
+                    &mut mod_texts,
+                    &mut cur_text,
+                    &mut text_is_mod,
+                )?;
+                cur_text = Some(TextBuilder::default());
+                text_is_mod = true;
+                in_mod = false;
+                continue;
+            }
+            if line.eq_ignore_ascii_case("[[setting.text]]") {
+                flush_text(
+                    &mut cur_setting,
+                    &mut mod_texts,
+                    &mut cur_text,
+                    &mut text_is_mod,
+                )?;
+                if cur_setting.is_none() {
+                    return Err("text outside [[setting]]".into());
+                }
+                cur_text = Some(TextBuilder::default());
+                text_is_mod = false;
+                in_mod = false;
+                continue;
+            }
+            flush_text(
+                &mut cur_setting,
+                &mut mod_texts,
+                &mut cur_text,
+                &mut text_is_mod,
+            )?;
             flush(&mut cur)?;
             flush_setting(&mut cur_setting)?;
             in_mod = line.eq_ignore_ascii_case("[mod]");
@@ -402,6 +512,15 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
             continue;
         };
         let key = k.trim().to_ascii_lowercase();
+        if let Some(t) = cur_text.as_mut() {
+            match key.as_str() {
+                "lang" => t.lang = Some(unquote(v)),
+                "label" => t.label = Some(unquote(v)),
+                "description" => t.description = Some(unquote(v)),
+                _ => {}
+            }
+            continue;
+        }
         if let Some(s) = cur_setting.as_mut() {
             match key.as_str() {
                 "id" => s.id = Some(unquote(v)),
@@ -450,10 +569,20 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
             }
         }
     }
+    flush_text(
+        &mut cur_setting,
+        &mut mod_texts,
+        &mut cur_text,
+        &mut text_is_mod,
+    )?;
     flush(&mut cur)?;
     flush_setting(&mut cur_setting)?;
     if id.is_empty() {
         return Err("mod without [mod] id".into());
+    }
+    let mut texts = Vec::with_capacity(mod_texts.len());
+    for t in mod_texts {
+        texts.push(t.build("mod")?);
     }
     Ok(Mod {
         id: id.clone(),
@@ -463,6 +592,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         enabled,
         settings,
         patches,
+        texts,
     })
 }
 
@@ -621,5 +751,67 @@ bytes = "66 0f 1f 44 00 00"
     fn unknown_op_still_rejected() {
         let toml = EXAMPLE_TOML.replace("write-bytes", "no-such-op");
         assert!(parse_mod(&toml).is_err());
+    }
+
+    const TEXT_TOML: &str = r#"
+[mod]
+id = "eu.savagecore.text_mod"
+label = "Source Label"
+description = "Source byline."
+
+[[mod.text]]
+lang = "nl"
+label = "Bronlabel"
+description = "Bronregel."
+
+[[setting]]
+id = "feat"
+kind = "bool"
+label = "Source row"
+description = "Source explain."
+default = true
+
+[[setting.text]]
+lang = "nl"
+label = "Bronrij"
+description = "Bronuitleg."
+
+[[setting.text]]
+lang = "de"
+label = "Quellzeile"
+"#;
+
+    #[test]
+    fn texts_parse_with_lang_lowercased() {
+        let m = parse_mod(TEXT_TOML).unwrap();
+        assert_eq!(m.texts.len(), 1);
+        assert_eq!(m.texts[0].lang, "nl");
+        assert_eq!(m.texts[0].label, "Bronlabel");
+        let s = setting(&m, "feat");
+        assert_eq!(s.texts.len(), 2);
+        assert_eq!(s.texts[0].lang, "nl");
+        assert_eq!(s.texts[1].lang, "de");
+        // German entry has no description: keeps source on apply.
+        assert!(s.texts[1].description.is_empty());
+    }
+
+    #[test]
+    fn texts_reject_missing_lang() {
+        let toml = TEXT_TOML.replace("lang = \"nl\"\n", "");
+        assert!(parse_mod(&toml).is_err());
+    }
+
+    #[test]
+    fn setting_text_outside_setting_rejected() {
+        let toml = "[[setting.text]]\nlang = \"nl\"\n";
+        assert!(parse_mod(&toml).is_err());
+    }
+
+    #[test]
+    fn patch_after_texts_still_parses() {
+        // A patch after text sections must not swallow their keys.
+        let toml = format!("{TEXT_TOML}\n[[patch]]\nid = \"p\"\nop = \"force-branch\"\npattern = \"48 3b df\"\noffset = 1\n");
+        let m = parse_mod(&toml).unwrap();
+        assert_eq!(m.patches.len(), 1);
     }
 }

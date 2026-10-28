@@ -10,6 +10,7 @@ use std::ffi::c_void;
 
 mod host;
 mod image;
+mod locale;
 mod log;
 mod ops;
 mod overlay;
@@ -65,6 +66,8 @@ unsafe fn init(hinst: *mut c_void) {
         .collect::<Vec<_>>()
         .join(" ");
     log.line(&format!("mods: {summary}"));
+    let (lang, source) = locale::current();
+    log.line(&format!("language: {lang} ({source})"));
 
     let mut done = 0;
     let mut total = 0;
