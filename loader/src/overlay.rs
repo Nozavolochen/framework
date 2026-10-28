@@ -24,6 +24,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::log::Log;
 use crate::spec::{Mod, Setting, SettingKind};
+use crate::strings::Strings;
 
 /// Backtick: the overlay key.
 const VK_OEM_3: i32 = 0xC0;
@@ -120,14 +121,14 @@ impl Row {
             .unwrap_or_else(|| self.setting.default.clone())
     }
 
-    fn display(&self) -> String {
+    fn display(&self, s: &Strings) -> String {
         let cur = self.current();
         match self.setting.kind {
             SettingKind::Bool => {
                 if cur.trim().eq_ignore_ascii_case("true") || cur.trim() == "1" {
-                    "on".into()
+                    s.get("chrome.on").to_string()
                 } else {
-                    "off".into()
+                    s.get("chrome.off").to_string()
                 }
             }
             SettingKind::Float => match cur.parse::<f64>() {
@@ -179,6 +180,8 @@ struct Overlay {
     /// picks them up: ((mod, setting), value, tick).
     pending: Vec<((String, String), String, u64)>,
     tick: u64,
+    /// Overlay chrome strings in the game's language (rebuilt on open).
+    strings: Strings,
 }
 
 unsafe impl Send for Overlay {}
@@ -327,9 +330,9 @@ impl Overlay {
                     ..self.rows[idx].setting.clone()
                 },
             }
-            .display();
+            .display(&self.strings);
         }
-        self.rows[idx].display()
+        self.rows[idx].display(&self.strings)
     }
 
     fn adjust(&mut self, dir: i32) {
@@ -1034,6 +1037,17 @@ impl Overlay {
         self.game_hwnd = 0;
         self.editing = None;
         self.selected = 0;
+        // Cheap (one small file read): the player may have changed the
+        // language since the last open.
+        let (lang, how) = match crate::host::game_root() {
+            Some(root) => crate::strings::detect_in(&root),
+            None => ("en", "fallback"),
+        };
+        crate::log::append(
+            "nozavolochen.log",
+            &format!("overlay: language {lang} ({how})"),
+        );
+        self.strings = Strings::load(lang, None);
         self.rebuild(&crate::host::current_mods());
         self.sync_window(foreground_window().unwrap_or(0));
         self.dirty = true;
@@ -1387,19 +1401,28 @@ impl Overlay {
                     }
                 }
             }
-            // Footer: keys amber, actions gray.
+            // Footer: keys amber, actions gray. Key names are keyboard
+            // labels and stay untranslated; actions come from strings.
+            let s = &self.strings;
             self.draw_footer_line(
                 hdc,
                 h - 56,
                 &[
-                    ("up/down", " select  "),
-                    ("left/right", " adjust  "),
-                    ("enter", " ok  "),
-                    ("del", " reset  "),
-                    ("esc", " close"),
+                    ("up/down", &format!(" {}  ", s.get("chrome.select"))),
+                    ("left/right", &format!(" {}  ", s.get("chrome.adjust"))),
+                    ("enter", &format!(" {}  ", s.get("chrome.ok"))),
+                    ("del", &format!(" {}  ", s.get("chrome.reset"))),
+                    ("esc", &format!(" {}", s.get("chrome.close"))),
                 ],
             );
-            self.draw_footer_line(hdc, h - 30, &[("esc", " close  "), ("`", " close")]);
+            self.draw_footer_line(
+                hdc,
+                h - 30,
+                &[
+                    ("esc", &format!(" {}  ", s.get("chrome.close"))),
+                    ("`", &format!(" {}", s.get("chrome.close"))),
+                ],
+            );
             DeleteObject(regular);
             DeleteObject(bold);
             ReleaseDC(self.hwnd as HWND, hdc);

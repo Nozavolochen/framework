@@ -11,8 +11,8 @@ use crate::spec::{parse_mod, Mod};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-/// `<game>/GAMEDATA/MODS`, derived from the host exe in `<game>/Binaries`.
-pub(crate) fn mods_dir() -> Option<String> {
+/// `<game>` (the folder holding `Binaries`), derived from the host exe.
+pub(crate) fn game_root() -> Option<std::path::PathBuf> {
     use windows_sys::Win32::Foundation::MAX_PATH;
     use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
     unsafe {
@@ -24,10 +24,15 @@ pub(crate) fn mods_dir() -> Option<String> {
         let host = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
         let bin_end = host.rfind(['/', '\\'])?;
         let game_end = host[..bin_end].rfind(['/', '\\'])?;
-        let game = &host[..game_end];
-        let sep = if host.contains('\\') { "\\" } else { "/" };
-        Some(format!("{game}{sep}GAMEDATA{sep}MODS"))
+        Some(std::path::PathBuf::from(&host[..game_end]))
     }
+}
+
+/// `<game>/GAMEDATA/MODS`, derived from the host exe in `<game>/Binaries`.
+pub(crate) fn mods_dir() -> Option<String> {
+    let game = game_root()?.into_os_string().into_string().ok()?;
+    let sep = if game.contains('\\') { "\\" } else { "/" };
+    Some(format!("{game}{sep}GAMEDATA{sep}MODS"))
 }
 
 /// Names of subdirectories directly under `dir`.

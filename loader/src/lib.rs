@@ -16,6 +16,7 @@ mod overlay;
 mod patch;
 mod proxy;
 mod spec;
+mod strings;
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 

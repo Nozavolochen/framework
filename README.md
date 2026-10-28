@@ -19,6 +19,23 @@ flat `xinput9_1_0.dll` at the root, marked as a required dependency on Nexus by 
 Mods ship only their `mod.toml` (plus static files if required) and never bundle
 the DLL.
 
+## Strings
+
+Overlay chrome lives in `loader/strings/<code>.json`: one flat object per
+language, every file with the same keys as `en.json`. English is built into
+the DLL and is the fallback for missing keys and unknown languages. The game
+language is read from `Binaries/SETTINGS/GCUSERSETTINGSDATA.MXML` (Steam
+`appmanifest_275850.acf` when the game follows Steam), so a game patch cannot
+break detection.
+
+`loader/strings` is the Weblate component root: translators edit the JSON
+there, never Rust. A new language ships by adding its file plus one line in
+`EXTRA` in `loader/src/strings.rs`.
+
+```sh
+make lang-check   # keys, value lengths, language codes
+```
+
 ## Build
 
 ```sh
