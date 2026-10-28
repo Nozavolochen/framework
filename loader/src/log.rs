@@ -46,8 +46,24 @@ impl Log {
         self.lines.push(format!("  {s}"));
     }
 
+    /// Start a new heading, like "patches" in the header.
+    pub fn section(&mut self, name: &str) {
+        self.lines.push(name.into());
+    }
+
     /// Write nozavolochen.log next to our DLL.
     pub fn write_beside(&self, hinst: *mut c_void) {
+        self.save(hinst, false);
+    }
+
+    /// Add to the end of nozavolochen.log. Used by the plugin thread,
+    /// which runs after init has already written the log.
+    pub fn append_beside(&self, hinst: *mut c_void) {
+        self.save(hinst, true);
+    }
+
+    fn save(&self, hinst: *mut c_void, append: bool) {
+        use std::io::Write;
         use windows_sys::Win32::Foundation::MAX_PATH;
         use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
         unsafe {
@@ -64,7 +80,17 @@ impl Log {
             }
             path.push_str("nozavolochen.log");
             let text = self.lines.join("\r\n") + "\r\n";
-            let _ = std::fs::write(&path, text);
+            if append {
+                let file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path);
+                if let Ok(mut f) = file {
+                    let _ = f.write_all(text.as_bytes());
+                }
+            } else {
+                let _ = std::fs::write(&path, text);
+            }
         }
         let _ = &self.name;
     }

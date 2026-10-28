@@ -4,7 +4,8 @@
 //! Entry runs synchronously on attach: forwarders first (the game needs
 //! them immediately), then mod discovery, then spec ops, then the log.
 //! Everything is fail-loud per patch; one broken signature never blocks
-//! the others or the controller forwarding.
+//! the others or the controller forwarding. Mods that name a native
+//! plugin get it loaded afterwards on a separate thread (see plugin.rs).
 
 use std::ffi::c_void;
 
@@ -13,6 +14,7 @@ mod image;
 mod log;
 mod ops;
 mod patch;
+mod plugin;
 mod proxy;
 mod spec;
 
@@ -56,10 +58,23 @@ unsafe fn init(hinst: *mut c_void) {
 
     let mut done = 0;
     let mut total = 0;
+    let mut plugins = Vec::new();
     for p in &mods {
         if !p.enabled {
             log.line(&format!("{}: disabled in config", p.id));
             continue;
+        }
+        if let Some(name) = &p.plugin {
+            match host::plugin_path(p, name) {
+                Ok(path) => {
+                    log.line(&format!("{}: plugin {name} queued", p.id));
+                    plugins.push(plugin::Plugin {
+                        owner: p.id.clone(),
+                        path,
+                    });
+                }
+                Err(e) => log.line(&format!("{}: plugin NOT LOADED - {e}", p.id)),
+            }
         }
         for patch in &p.patches {
             if let Some(f) = &patch.feature {
@@ -80,5 +95,17 @@ unsafe fn init(hinst: *mut c_void) {
     }
 
     log.line(&format!("result: {done}/{total} applied"));
+
+    for (folder, path) in host::loose_plugins() {
+        log.line(&format!("MODS\\{folder}: plugin {path} queued"));
+        plugins.push(plugin::Plugin {
+            owner: format!("MODS\\{folder}"),
+            path,
+        });
+    }
+    if !plugin::start(hinst, plugins) {
+        // Very unlikely; the game still runs, just without plugins.
+        log.line("plugins: loader thread could not start, none loaded");
+    }
     log.write_beside(hinst);
 }

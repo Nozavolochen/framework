@@ -71,7 +71,8 @@ pub fn discover(log: &mut Log) -> Vec<Mod> {
             Err(_) => continue,
         };
         match parse_mod(&text) {
-            Ok(p) => {
+            Ok(mut p) => {
+                p.dir = sub.clone();
                 log.line(&format!(
                     "mod {} {}: spec loaded from MODS\\{sub}",
                     p.id, p.version
@@ -86,4 +87,46 @@ pub fn discover(log: &mut Log) -> Vec<Mod> {
         }
     }
     mods
+}
+
+/// DLLs dropped into mod folders that have no mod.toml, as
+/// (folder, full path), sorted. Mods with a mod.toml name their plugin
+/// instead, so a stray DLL there is never picked up.
+pub fn loose_plugins() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Some(dir) = mods_dir() else {
+        return found;
+    };
+    for sub in subdirs(&dir) {
+        let folder = format!("{dir}\\{sub}");
+        if std::path::Path::new(&format!("{folder}\\mod.toml")).exists() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.file_type().is_ok_and(|t| t.is_file()) && crate::plugin::valid_name(&name) {
+                found.push((sub.clone(), format!("{folder}\\{name}")));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Full path of a mod's plugin DLL, or why it can't be used.
+pub fn plugin_path(m: &Mod, name: &str) -> Result<String, String> {
+    if !crate::plugin::valid_name(name) {
+        return Err(format!(
+            "{name:?} must be a .dll file name in the mod folder"
+        ));
+    }
+    let dir = mods_dir().ok_or("host path unknown")?;
+    let path = format!("{dir}\\{}\\{name}", m.dir);
+    if !std::path::Path::new(&path).is_file() {
+        return Err(format!("{name} not found in MODS\\{}", m.dir));
+    }
+    Ok(path)
 }

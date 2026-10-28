@@ -6,6 +6,7 @@
 //! id = "eu.savagecore.example_mod"
 //! version = "0.1.0"
 //! enabled = true
+//! plugin = "ExampleMod.dll" # optional: a DLL in this mod's folder
 //!
 //! [features]
 //! first_patch = true
@@ -69,6 +70,10 @@ pub struct Mod {
     pub id: String,
     pub version: String,
     pub enabled: bool,
+    /// Optional native plugin, a DLL file name in the mod's folder.
+    pub plugin: Option<String>,
+    /// Folder name under GAMEDATA/MODS (filled in by discovery).
+    pub dir: String,
     /// (key, value) from `[features]`; missing keys default to true.
     pub features: Vec<(String, bool)>,
     pub patches: Vec<Patch>,
@@ -245,6 +250,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
     let mut id = String::new();
     let mut version = String::new();
     let mut enabled = true;
+    let mut plugin = None;
     let mut features: Vec<(String, bool)> = Vec::new();
     let mut patches: Vec<Patch> = Vec::new();
     let mut cur: Option<PatchBuilder> = None;
@@ -302,6 +308,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
             match key.as_str() {
                 "id" => id = unquote(v),
                 "version" => version = unquote(v),
+                "plugin" => plugin = Some(unquote(v)),
                 "enabled" => {
                     if let Some(b) = parse_bool(v) {
                         enabled = b;
@@ -323,6 +330,8 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         id,
         version,
         enabled,
+        plugin,
+        dir: String::new(),
         features,
         patches,
     })
