@@ -4,6 +4,8 @@
 #   make dist       pack the framework release zip
 #   make assets     regenerate the Nexus page images (header + main)
 #   make lang-check verify loader/strings/*.json (keys, lengths, codes)
+#   make check      repo checks for the pre-push hook (lang-check; spec
+#                   verification lives with the mods, see above)
 #   make clean      drop build outputs
 #
 # Spec verification lives with the mods: each mod runs
@@ -24,7 +26,7 @@ VERSION := $(shell grep '^version' loader/Cargo.toml | head -1 | cut -d'"' -f2)
 
 FRAMEWORK_ZIP := $(DIST)/Nozavolochen Framework $(VERSION).zip
 
-.PHONY: loader dist assets clean lang-check
+.PHONY: loader dist assets clean lang-check check
 
 loader:
 	@cd loader && cargo build --target x86_64-pc-windows-gnu --release
@@ -47,3 +49,5 @@ assets:
 
 lang-check:
 	python3 tools/check_strings.py
+
+check: lang-check
