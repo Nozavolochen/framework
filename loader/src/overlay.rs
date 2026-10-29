@@ -1611,17 +1611,8 @@ impl Overlay {
                     let entry = self.mod_entries[n].clone();
                     let tall = !entry.description.is_empty() || entry.error.is_some();
                     let h = if tall { 44 } else { 26 };
-                    if n == self.mod_selected {
-                        let sel = CreateSolidBrush(0x005A463C); // BGR (60,70,90)
-                        let srect = RECT {
-                            left: 8,
-                            top: y,
-                            right: w - 8,
-                            bottom: y + h,
-                        };
-                        FillRect(hdc, &srect, sel);
-                        DeleteObject(sel);
-                    }
+                    // No selection fill: like Settings-page headers,
+                    // the selected entry shows `> ` plus white text.
                     let marker = if n == self.mod_selected { "> " } else { "  " };
                     SelectObject(hdc, bold);
                     SetTextColor(
