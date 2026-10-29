@@ -1,12 +1,18 @@
-//! Overlay display language for mod-provided strings.
+//! Display language for mods and overlay chrome.
 //!
-//! Resolved once per process: the game's own language choice
-//! (`Binaries\SETTINGS\GCUSERSETTINGSDATA.MXML`, which the game
-//! rewrites itself), else the Steam client's language
-//! (`steamapps\appmanifest_275850.acf`), else English.
-//! `apply_locale` swaps a spec's labels/descriptions for matching
-//! `[[mod.text]]` / `[[setting.text]]` entries; anything unmatched
-//! stays in source English, so partial translations degrade cleanly.
+//! Detection is shared with the Weblate tables: the game's own
+//! language choice (`Binaries\SETTINGS\GCUSERSETTINGSDATA.MXML`,
+//! which the game rewrites itself), else the Steam client language
+//! (`steamapps\appmanifest_275850.acf`), else English
+//! (`nozavolochen_strings::detect_in`).
+//!
+//! Two layers share that language:
+//! - overlay chrome (`loader/strings/<code>.json` via the
+//!   `nozavolochen-strings` crate, English fallback built in);
+//! - mod-provided strings: `apply_locale` swaps a spec's
+//!   labels/descriptions for matching `[[mod.text]]` /
+//!   `[[setting.text]]` entries; anything unmatched stays in source
+//!   English, so partial translations degrade cleanly.
 
 use std::sync::Mutex;
 
@@ -19,11 +25,17 @@ static LOCALE: Mutex<(String, String)> = Mutex::new((String::new(), String::new(
 
 /// Re-resolve the display language and cache it. Returns `(code, source)`.
 pub fn refresh() -> (String, String) {
-    let detected = detect();
+    let (code, source) = match crate::host::game_root() {
+        Some(root) => {
+            let (c, s) = nozavolochen_strings::detect_in(&root);
+            (c.to_string(), s.to_string())
+        }
+        None => ("en".to_string(), "fallback".to_string()),
+    };
     if let Ok(mut guard) = LOCALE.lock() {
-        *guard = detected.clone();
+        *guard = (code.clone(), source.clone());
     }
-    detected
+    (code, source)
 }
 
 /// The cached display language, detecting once when empty.
@@ -43,137 +55,6 @@ pub fn localized_mods() -> Vec<Mod> {
         apply_locale(m);
     }
     mods
-}
-
-/// Framework chrome words (`on`/`off` markers, footer actions).
-/// Only languages with a verified table translate; everything else
-/// stays English. (The strings-table branch remains the long-term
-/// Weblate home for these; this inline table covers what mods need
-/// today without new dependencies.)
-pub fn chrome(lang: &str, key: &str) -> &'static str {
-    match (lang, key) {
-        ("nl", "on") => "aan",
-        ("nl", "off") => "uit",
-        ("nl", "select") => "selecteren",
-        ("nl", "adjust") => "aanpassen",
-        ("nl", "ok") => "ok",
-        ("nl", "reset") => "resetten",
-        ("nl", "switch") => "wisselen",
-        ("nl", "close") => "sluiten",
-        ("de", "on") => "an",
-        ("de", "off") => "aus",
-        ("de", "select") => "auswählen",
-        ("de", "adjust") => "anpassen",
-        ("de", "ok") => "ok",
-        ("de", "reset") => "zurücksetzen",
-        ("de", "switch") => "wechseln",
-        ("de", "close") => "schließen",
-        ("fr", "on") => "oui",
-        ("fr", "off") => "non",
-        ("fr", "select") => "sélectionner",
-        ("fr", "adjust") => "ajuster",
-        ("fr", "ok") => "ok",
-        ("fr", "reset") => "réinitialiser",
-        ("fr", "switch") => "changer",
-        ("fr", "close") => "fermer",
-        ("it", "on") => "sì",
-        ("it", "off") => "no",
-        ("it", "select") => "selezionare",
-        ("it", "adjust") => "regolare",
-        ("it", "ok") => "ok",
-        ("it", "reset") => "reimpostare",
-        ("it", "switch") => "cambiare",
-        ("it", "close") => "chiudere",
-        ("es", "on") => "sí",
-        ("es", "off") => "no",
-        ("es", "select") => "seleccionar",
-        ("es", "adjust") => "ajustar",
-        ("es", "ok") => "ok",
-        ("es", "reset") => "restablecer",
-        ("es", "switch") => "cambiar",
-        ("es", "close") => "cerrar",
-        ("es-419", "on") => "sí",
-        ("es-419", "off") => "no",
-        ("es-419", "select") => "seleccionar",
-        ("es-419", "adjust") => "ajustar",
-        ("es-419", "ok") => "ok",
-        ("es-419", "reset") => "restablecer",
-        ("es-419", "switch") => "cambiar",
-        ("es-419", "close") => "cerrar",
-        ("ru", "on") => "да",
-        ("ru", "off") => "нет",
-        ("ru", "select") => "выбрать",
-        ("ru", "adjust") => "настроить",
-        ("ru", "ok") => "OK",
-        ("ru", "reset") => "сбросить",
-        ("ru", "switch") => "переключить",
-        ("ru", "close") => "закрыть",
-        ("pl", "on") => "tak",
-        ("pl", "off") => "nie",
-        ("pl", "select") => "wybrać",
-        ("pl", "adjust") => "dostosować",
-        ("pl", "ok") => "OK",
-        ("pl", "reset") => "zresetować",
-        ("pl", "switch") => "przełączyć",
-        ("pl", "close") => "zamknąć",
-        ("pt", "on") => "sim",
-        ("pt", "off") => "não",
-        ("pt", "select") => "selecionar",
-        ("pt", "adjust") => "ajustar",
-        ("pt", "ok") => "ok",
-        ("pt", "reset") => "repor",
-        ("pt", "switch") => "mudar",
-        ("pt", "close") => "fechar",
-        ("pt-BR", "on") => "sim",
-        ("pt-BR", "off") => "não",
-        ("pt-BR", "select") => "selecionar",
-        ("pt-BR", "adjust") => "ajustar",
-        ("pt-BR", "ok") => "ok",
-        ("pt-BR", "reset") => "redefinir",
-        ("pt-BR", "switch") => "alternar",
-        ("pt-BR", "close") => "fechar",
-        ("ja", "on") => "オン",
-        ("ja", "off") => "オフ",
-        ("ja", "select") => "選択する",
-        ("ja", "adjust") => "調整する",
-        ("ja", "ok") => "OK",
-        ("ja", "reset") => "リセット",
-        ("ja", "switch") => "切り替え",
-        ("ja", "close") => "閉じる",
-        ("zh", "on") => "开",
-        ("zh", "off") => "关",
-        ("zh", "select") => "选择",
-        ("zh", "adjust") => "调整",
-        ("zh", "ok") => "确定",
-        ("zh", "reset") => "重置",
-        ("zh", "switch") => "切换",
-        ("zh", "close") => "关闭",
-        ("zh-Hant", "on") => "開",
-        ("zh-Hant", "off") => "關",
-        ("zh-Hant", "select") => "選擇",
-        ("zh-Hant", "adjust") => "調整",
-        ("zh-Hant", "ok") => "確定",
-        ("zh-Hant", "reset") => "重設",
-        ("zh-Hant", "switch") => "切換",
-        ("zh-Hant", "close") => "關閉",
-        ("ko", "on") => "켜짐",
-        ("ko", "off") => "꺼짐",
-        ("ko", "select") => "선택",
-        ("ko", "adjust") => "조정",
-        ("ko", "ok") => "확인",
-        ("ko", "reset") => "재설정",
-        ("ko", "switch") => "전환",
-        ("ko", "close") => "닫기",
-        (_, "on") => "on",
-        (_, "off") => "off",
-        (_, "select") => "select",
-        (_, "adjust") => "adjust",
-        (_, "ok") => "ok",
-        (_, "reset") => "reset",
-        (_, "switch") => "switch",
-        (_, "close") => "close",
-        _ => "",
-    }
 }
 
 /// Swap matching translated labels/descriptions into the spec.
@@ -209,132 +90,9 @@ pub fn apply_locale_for(spec: &mut Mod, code: &str) {
     }
 }
 
-fn detect() -> (String, String) {
-    if let Some(root) = crate::host::game_root() {
-        let settings = root
-            .join("Binaries")
-            .join("SETTINGS")
-            .join("GCUSERSETTINGSDATA.MXML");
-        if let Some(name) = std::fs::read_to_string(&settings)
-            .ok()
-            .and_then(|t| parse_settings(&t))
-        {
-            if let Some(code) = from_game_name(&name) {
-                return (code.to_string(), "user settings".to_string());
-            }
-        }
-        let manifest = root
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("appmanifest_275850.acf"))
-            .unwrap_or_default();
-        if let Some(name) = std::fs::read_to_string(&manifest)
-            .ok()
-            .and_then(|t| parse_manifest(&t))
-        {
-            if let Some(code) = from_game_name(&name) {
-                return (code.to_string(), "steam".to_string());
-            }
-        }
-    }
-    ("en".to_string(), "fallback".to_string())
-}
-
-/// The inner `Language` value of the `TkLanguages` property.
-fn parse_settings(xml: &str) -> Option<String> {
-    let at = xml.find(r#"value="TkLanguages""#)?;
-    let rest = &xml[at..];
-    let end = rest.find("</Property>").unwrap_or(rest.len());
-    let block = &rest[..end];
-    let p = block.find(r#"name="Language""#)?;
-    let tail = &block[p..];
-    let v = tail.find(r#"value=""#)? + 7;
-    let tail = &tail[v..];
-    Some(tail[..tail.find('"')?].to_string())
-}
-
-/// The `language` value under `UserConfig` (else the first `language` key).
-fn parse_manifest(acf: &str) -> Option<String> {
-    let scan = |text: &str| -> Option<String> {
-        for line in text.lines() {
-            let mut q = line.split('"').filter(|s| !s.trim().is_empty());
-            if q.next().map(|k| k.eq_ignore_ascii_case("language")) == Some(true) {
-                if let Some(v) = q.next() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-        None
-    };
-    match acf.find("\"UserConfig\"") {
-        Some(i) => scan(&acf[i..]).or_else(|| scan(acf)),
-        None => scan(acf),
-    }
-}
-
-/// Maps the game's `TkLanguages` names and Steam language names to
-/// locale codes (`SUPPORTED`-style set shared with the strings work).
-fn from_game_name(name: &str) -> Option<&'static str> {
-    let n: String = name
-        .trim()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    Some(match n.as_str() {
-        "english" | "usenglish" | "en" | "enus" | "engb" => "en",
-        "french" | "fr" => "fr",
-        "italian" | "it" => "it",
-        "german" | "de" => "de",
-        "spanish" | "es" => "es",
-        "latinamericanspanish" | "latam" | "es419" | "esmx" => "es-419",
-        "russian" | "ru" => "ru",
-        "polish" | "pl" => "pl",
-        "dutch" | "nl" => "nl",
-        "portuguese" | "pt" | "ptpt" => "pt",
-        "brazilianportuguese" | "brazilian" | "ptbr" => "pt-BR",
-        "japanese" | "ja" | "jp" => "ja",
-        "korean" | "koreana" | "ko" => "ko",
-        "simplifiedchinese" | "schinese" | "tencentchinese" | "zh" | "zhcn" | "zhhans" => "zh",
-        "traditionalchinese" | "tchinese" | "zhhant" | "zhtw" | "zhhk" => "zh-Hant",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn names_map() {
-        for (n, c) in [
-            ("English", "en"),
-            ("USEnglish", "en"),
-            ("German", "de"),
-            ("Dutch", "nl"),
-            ("LatinAmericanSpanish", "es-419"),
-            ("BrazilianPortuguese", "pt-BR"),
-            ("SimplifiedChinese", "zh"),
-            ("TencentChinese", "zh"),
-            ("TraditionalChinese", "zh-Hant"),
-            ("Korean", "ko"),
-            ("nl", "nl"),
-        ] {
-            assert_eq!(from_game_name(n), Some(c), "{n}");
-        }
-        assert_eq!(from_game_name("Default"), None);
-        assert_eq!(from_game_name("Klingon"), None);
-    }
-
-    #[test]
-    fn settings_and_manifest_parse() {
-        let xml = "<Property name=\"Language\" value=\"TkLanguages\">\n<Property name=\"Language\" value=\"German\" />\n</Property>";
-        assert_eq!(parse_settings(xml).as_deref(), Some("German"));
-        assert_eq!(parse_settings("<Data/>"), None);
-        let acf = "\"UserConfig\"\n{\n\"language\"\t\"french\"\n}";
-        assert_eq!(parse_manifest(acf).as_deref(), Some("french"));
-        assert_eq!(parse_manifest("nothing here"), None);
-    }
 
     #[test]
     fn refresh_falls_back_without_game_files() {
@@ -390,32 +148,28 @@ label = "BRrij"
     }
 
     #[test]
-    fn chrome_dutch_and_fallback() {
-        assert_eq!(chrome("nl", "on"), "aan");
-        assert_eq!(chrome("nl", "off"), "uit");
-        assert_eq!(chrome("nl", "select"), "selecteren");
-        assert_eq!(chrome("nl", "adjust"), "aanpassen");
-        assert_eq!(chrome("nl", "ok"), "ok");
-        assert_eq!(chrome("nl", "reset"), "resetten");
-        assert_eq!(chrome("nl", "switch"), "wisselen");
-        assert_eq!(chrome("nl", "close"), "sluiten");
-        assert_eq!(chrome("xx", "on"), "on");
-        assert_eq!(chrome("xx", "switch"), "switch");
-        assert_eq!(chrome("nl", "nope"), "");
-    }
-
-    #[test]
-    fn chrome_covers_every_game_language() {
-        // Every code the detector can produce must resolve all keys.
-        for lang in [
-            "en", "de", "fr", "it", "es", "es-419", "ru", "pl", "nl", "pt", "pt-BR", "ja", "zh",
-            "zh-Hant", "ko",
-        ] {
+    fn chrome_comes_from_string_tables() {
+        // `loader/strings/en.json` is the key set; every supported
+        // language resolves every key (English fallback underneath).
+        let en = nozavolochen_strings::Strings::load("en", None);
+        assert_eq!(en.get("chrome.switch"), "switch");
+        for lang in nozavolochen_strings::SUPPORTED {
+            let t = nozavolochen_strings::Strings::load(lang, None);
             for key in [
-                "on", "off", "select", "adjust", "ok", "reset", "switch", "close",
+                "chrome.on",
+                "chrome.off",
+                "chrome.select",
+                "chrome.adjust",
+                "chrome.ok",
+                "chrome.reset",
+                "chrome.switch",
+                "chrome.close",
             ] {
-                assert!(!chrome(lang, key).is_empty(), "{lang}/{key}");
+                assert!(!t.get(key).is_empty(), "{lang}/{key}");
             }
         }
+        // Unknown languages fall back to English.
+        let t = nozavolochen_strings::Strings::load("xx", None);
+        assert_eq!(t.get("chrome.on"), "on");
     }
 }

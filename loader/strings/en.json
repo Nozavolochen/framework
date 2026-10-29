@@ -1,0 +1,10 @@
+{
+  "chrome.adjust": "adjust",
+  "chrome.close": "close",
+  "chrome.off": "off",
+  "chrome.ok": "ok",
+  "chrome.on": "on",
+  "chrome.reset": "reset",
+  "chrome.select": "select",
+  "chrome.switch": "switch"
+}

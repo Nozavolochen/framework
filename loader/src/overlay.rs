@@ -25,6 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::log::Log;
 use crate::spec::{Mod, Setting, SettingKind};
 
+use nozavolochen_strings::Strings;
+
 /// Backtick: the overlay key.
 const VK_OEM_3: i32 = 0xC0;
 /// Tab: switch between the Settings and Mods pages.
@@ -128,15 +130,14 @@ impl Row {
             .unwrap_or_else(|| self.setting.default.clone())
     }
 
-    fn display(&self) -> String {
+    fn display(&self, s: &Strings) -> String {
         let cur = self.current();
-        let (lang, _) = crate::locale::current();
         match self.setting.kind {
             SettingKind::Bool => {
                 if cur.trim().eq_ignore_ascii_case("true") || cur.trim() == "1" {
-                    crate::locale::chrome(&lang, "on").to_string()
+                    s.get("chrome.on").to_string()
                 } else {
-                    crate::locale::chrome(&lang, "off").to_string()
+                    s.get("chrome.off").to_string()
                 }
             }
             SettingKind::Float => match cur.parse::<f64>() {
@@ -221,6 +222,8 @@ struct Overlay {
     /// them: (mod id, enabled, tick).
     pending_mods: Vec<(String, bool, u64)>,
     tick: u64,
+    /// Overlay chrome strings in the game's language (rebuilt on open).
+    strings: Strings,
 }
 
 unsafe impl Send for Overlay {}
@@ -421,9 +424,9 @@ impl Overlay {
                     ..self.rows[idx].setting.clone()
                 },
             }
-            .display();
+            .display(&self.strings);
         }
-        self.rows[idx].display()
+        self.rows[idx].display(&self.strings)
     }
 
     fn adjust(&mut self, dir: i32) {
@@ -1337,12 +1340,14 @@ impl Overlay {
         self.mod_selected = 0;
         self.page = Page::Settings;
         // Cheap (two small file reads): NMS hot-applies language
-        // changes, so re-resolve on every open.
+        // changes, so re-resolve on every open. Chrome strings and
+        // mod text localise together from the same language.
         let (lang, source) = crate::locale::refresh();
         crate::log::append(
             "nozavolochen.log",
             &format!("overlay: language {lang} ({source})"),
         );
+        self.strings = Strings::load(&lang, None);
         self.rebuild(&crate::locale::localized_mods());
         self.sync_window(foreground_window().unwrap_or(0));
         self.dirty = true;
@@ -1602,8 +1607,6 @@ impl Overlay {
             // Mods page: one row per installed mod, then the shared footer.
             let mut y = 52;
             if self.page == Page::Mods {
-                let (lang, _) = crate::locale::current();
-                let c = |key: &str| crate::locale::chrome(&lang, key);
                 for n in 0..self.mod_entries.len() {
                     let entry = self.mod_entries[n].clone();
                     let tall = !entry.description.is_empty() || entry.error.is_some();
@@ -1652,8 +1655,8 @@ impl Overlay {
                     // unloadable folders. Pending switches render amber.
                     let state: &str = match self.mod_display(n) {
                         None => "error",
-                        Some(true) => c("on"),
-                        Some(false) => c("off"),
+                        Some(true) => self.strings.get("chrome.on"),
+                        Some(false) => self.strings.get("chrome.off"),
                     };
                     let pending = self.is_mod_pending(n);
                     SetTextColor(
@@ -1872,26 +1875,25 @@ impl Overlay {
                 }
             } // Page::Settings items loop
               // Footer: keys amber, actions gray. Key names are keyboard
-              // labels and stay untranslated; actions come from chrome.
-            let (lang, _) = crate::locale::current();
-            let c = |key: &str| crate::locale::chrome(&lang, key);
+              // labels and stay untranslated; actions come from strings.
+            let s = &self.strings;
             self.draw_footer_line(
                 hdc,
                 h - 56,
                 &[
-                    ("up/down", &format!(" {}  ", c("select"))),
-                    ("left/right", &format!(" {}  ", c("adjust"))),
-                    ("enter", &format!(" {}  ", c("ok"))),
-                    ("del", &format!(" {}  ", c("reset"))),
-                    ("esc", &format!(" {}", c("close"))),
+                    ("up/down", &format!(" {}  ", s.get("chrome.select"))),
+                    ("left/right", &format!(" {}  ", s.get("chrome.adjust"))),
+                    ("enter", &format!(" {}  ", s.get("chrome.ok"))),
+                    ("del", &format!(" {}  ", s.get("chrome.reset"))),
+                    ("esc", &format!(" {}", s.get("chrome.close"))),
                 ],
             );
             self.draw_footer_line(
                 hdc,
                 h - 30,
                 &[
-                    ("tab", &format!(" {}  ", c("switch"))),
-                    ("`", &format!(" {}", c("close"))),
+                    ("tab", &format!(" {}  ", s.get("chrome.switch"))),
+                    ("`", &format!(" {}", s.get("chrome.close"))),
                 ],
             );
             DeleteObject(regular);

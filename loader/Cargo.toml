@@ -10,6 +10,8 @@ name = "xinput9_1_0"
 
 [dependencies]
 retour = "0.3"
+serde_json = "1"
+nozavolochen-strings = { version = "0.0.0", path = "crates/strings" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
@@ -23,6 +25,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[workspace]
+members = [".", "crates/strings"]
 
 [profile.release]
 opt-level = 3
