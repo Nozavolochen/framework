@@ -8,8 +8,10 @@ Checks, per [[patch]]:
 - retarget-jmp: replicates the structural filter (backward e9 into a
   `test al,al` + je site) and requires exactly one survivor.
 - detour-with-arg-overrides: pattern matches exactly once in .text.
-- page-size-override: anchors present as NUL-terminated ASCII with
-  unique xrefs; NEXT_PAGE / PREV_PAGE step patterns unique in .text.
+- page-size-override: anchors present as NUL-terminated ASCII;
+  xref count ruled by the patch's xref_policy (unique, or
+  any-outer-with-scale which tries each outer); NEXT_PAGE /
+  PREV_PAGE step patterns unique in .text.
 
 Also checks every [[mod.text]] / [[setting.text]] block carries a
 non-empty lang (translations themselves are not verified).
@@ -253,20 +255,31 @@ def main():
                 elif op == "page-size-override":
                     items = int(p["items"])
                     assert items != 8, "vanilla item count does nothing"
-                    for a in ["TRANSFER_RECEIVE_DESC", "PRODUCTS_ALL"]:
+                    tx_anchor = p.get("transfer_anchor", "TRANSFER_RECEIVE_DESC")
+                    craft_anchor = p.get("craft_anchor", "PRODUCTS_ALL")
+                    slot_format = p.get("slot_format", "SLOT%02d")
+                    policy = p.get("xref_policy", "unique").strip().lower()
+                    assert policy in ("unique", "any-outer-with-scale"), \
+                        f"unknown xref_policy {p.get('xref_policy')!r}"
+                    for a in [tx_anchor, craft_anchor]:
                         refs = rip_lea_xrefs(blob, base_rva,
                                              find_c_strings(data, sections, a))
-                        assert len(refs) == 1, f"{a}: {len(refs)} xrefs, want 1"
+                        if policy == "unique":
+                            assert len(refs) == 1, f"{a}: {len(refs)} xrefs, want 1"
+                        else:
+                            assert refs, f"{a}: no xrefs"
+                            if len(refs) != 1:
+                                print(f"  {pid}: note {a} has {len(refs)} xrefs (loader tries each outer)")
                     slot_refs = rip_lea_xrefs(blob, base_rva,
-                                              find_c_strings(data, sections, "SLOT%02d"))
-                    assert slot_refs, "SLOT%02d: no xrefs"
+                                              find_c_strings(data, sections, slot_format))
+                    assert slot_refs, f"{slot_format}: no xrefs"
                     assert len(scan(blob, NEXT_PAGE, b"\x01" * len(NEXT_PAGE))) == 1, \
                         "NEXT_PAGE step not unique"
                     assert len(scan(blob, PREV_PAGE, b"\x01" * len(PREV_PAGE))) >= 1, \
                         "PREV_PAGE step missing"
                     scale = struct.pack("<f", 0.125)
                     assert scale in blob, "0.125 scale float missing"
-                    print(f"  {pid}: OK anchors unique, steps unique, items={items}")
+                    print(f"  {pid}: OK slot filler + anchors present, items={items} policy={policy}")
                 else:
                     raise AssertionError(f"unknown op {op!r}")
             except AssertionError as e:

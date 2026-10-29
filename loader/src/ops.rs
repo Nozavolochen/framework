@@ -10,7 +10,7 @@ use retour::RawDetour;
 
 use crate::log::Log;
 use crate::patch;
-use crate::spec::{Op, Patch, Setting};
+use crate::spec::{Op, Patch, Setting, XrefPolicy};
 
 fn text() -> Result<(usize, usize), String> {
     patch::host_text()
@@ -160,11 +160,25 @@ fn pages_restore() -> Result<bool, String> {
     Ok(true)
 }
 
-fn pages_apply(items: u32) -> Result<String, String> {
+fn pages_apply(
+    items: u32,
+    transfer_anchor: &str,
+    craft_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Result<String, String> {
     use crate::image;
     let exe = host_exe_path()?;
     let img = image::FileImage::load(&exe)?;
-    let plans = image::plan_all(&img, items).map_err(|e| format!("left vanilla: {e}"))?;
+    let (plans, warnings) = image::plan_all(
+        &img,
+        items,
+        transfer_anchor,
+        craft_anchor,
+        slot_format,
+        policy,
+    )
+    .map_err(|e| format!("left vanilla: {e}"))?;
 
     // Verify everything against live memory first (all-or-none).
     unsafe {
@@ -206,14 +220,27 @@ fn pages_apply(items: u32) -> Result<String, String> {
             });
         }
     }
-    Ok(format!(
-        "{items} items per page on Transfer Items and Craft Product"
-    ))
+    Ok(if warnings.is_empty() {
+        format!("{items} items per page on Transfer Items and Craft Product")
+    } else {
+        format!(
+            "{items} items per page on Transfer Items and Craft Product (dots left vanilla: {})",
+            warnings.join("; ")
+        )
+    })
 }
 
 /// Retune the page size: restore the previous plan, then apply fresh
 /// (or stay vanilla when off or at the 8-item default).
-fn retune_pages(_id: &str, on: bool, items: i64) -> Result<String, String> {
+fn retune_pages(
+    _id: &str,
+    on: bool,
+    items: i64,
+    transfer_anchor: &str,
+    craft_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Result<String, String> {
     if items < 1 || items > 127 {
         return Err(format!("items {items} outside 1 to 127"));
     }
@@ -225,14 +252,26 @@ fn retune_pages(_id: &str, on: bool, items: i64) -> Result<String, String> {
             "8 items per page, the game default. Nothing patched.".into()
         });
     }
-    pages_apply(items as u32)
+    pages_apply(
+        items as u32,
+        transfer_anchor,
+        craft_anchor,
+        slot_format,
+        policy,
+    )
 }
 
-fn run_page_size_override(items: u32) -> Result<String, String> {
+fn run_page_size_override(
+    items: u32,
+    transfer_anchor: &str,
+    craft_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Result<String, String> {
     if items == 8 {
         return Ok("8 items per page, the game default. Nothing patched.".into());
     }
-    pages_apply(items)
+    pages_apply(items, transfer_anchor, craft_anchor, slot_format, policy)
 }
 
 // DoInventorySlots hook: 15 args, so RawDetour (retour caps at 14).
@@ -529,10 +568,20 @@ pub fn retune(patch: &Patch, settings: &[Setting], enabled: bool) -> Result<Stri
         Op::RetargetJmp { pat, mask, offset } => retune_bytes(&patch.id, on, &mut || {
             run_retarget_jmp(&patch.id, pat, mask, *offset)
         }),
-        Op::PageSizeOverride { items } => retune_pages(
+        Op::PageSizeOverride {
+            items,
+            transfer_anchor,
+            craft_anchor,
+            slot_format,
+            xref_policy,
+        } => retune_pages(
             &patch.id,
             on,
             int_setting(settings, "items").unwrap_or(*items as i64),
+            transfer_anchor,
+            craft_anchor,
+            slot_format,
+            *xref_policy,
         ),
         Op::DetourWithArgOverrides {
             pat,
@@ -658,12 +707,24 @@ pub fn run(patch: &Patch, settings: &[Setting], _log: &mut Log) -> Result<String
         } => run_write_bytes(&patch.id, pat, mask, *offset, expect.as_deref(), bytes),
         Op::ForceBranch { pat, mask, offset } => run_force_branch(&patch.id, pat, mask, *offset),
         Op::RetargetJmp { pat, mask, offset } => run_retarget_jmp(&patch.id, pat, mask, *offset),
-        Op::PageSizeOverride { items } => {
+        Op::PageSizeOverride {
+            items,
+            transfer_anchor,
+            craft_anchor,
+            slot_format,
+            xref_policy,
+        } => {
             let n = int_setting(settings, "items").unwrap_or(*items as i64);
             if n < 1 || n > 127 {
                 return Err(format!("items {n} outside 1 to 127"));
             }
-            run_page_size_override(n as u32)
+            run_page_size_override(
+                n as u32,
+                transfer_anchor,
+                craft_anchor,
+                slot_format,
+                *xref_policy,
+            )
         }
         Op::DetourWithArgOverrides {
             pat,

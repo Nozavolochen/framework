@@ -14,6 +14,8 @@
 
 use std::ops::Range;
 
+use crate::spec::XrefPolicy;
+
 pub struct Section {
     pub name: [u8; 8],
     pub rva: usize,
@@ -339,25 +341,59 @@ fn call_targets(img: &FileImage, code_rva: usize, start: usize, end: usize) -> V
     out
 }
 
-fn find_slot_filler(img: &FileImage) -> Option<(usize, usize)> {
+fn find_slot_filler(
+    img: &FileImage,
+    transfer_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Option<(usize, usize)> {
     let (code_rva, _) = img.text_range()?;
-    let tx = anchor_xrefs(img, "TRANSFER_RECEIVE_DESC");
-    if tx.len() != 1 {
+    let tx = anchor_xrefs(img, transfer_anchor);
+    if tx.is_empty() {
         return None;
     }
-    let outer = function_span_by_rva(img, code_rva, tx[0])?;
-    let slot_refs = anchor_xrefs(img, "SLOT%02d");
-    let mut found = None;
-    for t in call_targets(img, code_rva, outer.0, outer.1) {
-        let span = function_span_by_rva(img, code_rva, t)?;
-        if span.0 != t {
-            continue;
-        }
-        if slot_refs.iter().any(|&r| span.0 <= r && r < span.1) {
-            if found.is_some() {
-                return None;
+    // Unique keeps the pre-Forsaken fail-closed rule: exactly one xref.
+    // AnyOuterWithScale tries every xref outer (Forsaken added a second
+    // TRANSFER_RECEIVE_DESC string-table xref that never calls the slot
+    // filler) and keeps the single distinct slot-filler span found.
+    if policy == XrefPolicy::Unique && tx.len() != 1 {
+        return None;
+    }
+    let slot_refs = anchor_xrefs(img, slot_format);
+    if slot_refs.is_empty() {
+        return None;
+    }
+    let mut found: Option<(usize, usize)> = None;
+    for xref in tx {
+        let outer = match function_span_by_rva(img, code_rva, xref) {
+            Some(o) => o,
+            None => {
+                if policy == XrefPolicy::Unique {
+                    return None;
+                }
+                continue;
             }
-            found = Some(span);
+        };
+        for t in call_targets(img, code_rva, outer.0, outer.1) {
+            let span = match function_span_by_rva(img, code_rva, t) {
+                Some(s) => s,
+                None => {
+                    if policy == XrefPolicy::Unique {
+                        return None;
+                    }
+                    continue;
+                }
+            };
+            if span.0 != t {
+                continue;
+            }
+            if slot_refs.iter().any(|&r| span.0 <= r && r < span.1) {
+                match found {
+                    None => found = Some(span),
+                    Some(prev) if prev == span => {}
+                    _ => return None,
+                }
+            }
         }
     }
     found
@@ -372,23 +408,57 @@ fn plan_scale_redirect(
     code_rva: usize,
     anchor: &str,
     items: u32,
+    policy: XrefPolicy,
 ) -> Option<ScaleRedirect> {
     if items < 1 {
         return None;
     }
+    // Unique keeps the old rule (exactly one xref). AnyOuterWithScale
+    // tries every xref outer (Forsaken added a second
+    // TRANSFER_RECEIVE_DESC xref outside the dots function) and keeps
+    // the single outer that yields a scale plan.
     let refs = anchor_xrefs(img, anchor);
-    if refs.len() != 1 {
+    if refs.is_empty() {
         return None;
     }
-    let span = function_span_by_rva(img, code_rva, refs[0])?;
-    plan_scale_in(img, code_rva, span, items)
+    if policy == XrefPolicy::Unique {
+        if refs.len() != 1 {
+            return None;
+        }
+        let span = function_span_by_rva(img, code_rva, refs[0])?;
+        return plan_scale_in(img, code_rva, span, items);
+    }
+    let mut found = None;
+    for r in refs {
+        let span = match function_span_by_rva(img, code_rva, r) {
+            Some(s) => s,
+            None => continue,
+        };
+        match plan_scale_in(img, code_rva, span, items) {
+            Some(p) => {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(p);
+            }
+            None => continue,
+        }
+    }
+    found
 }
 
-fn plan_slot_filler(img: &FileImage, code_rva: usize, items: u32) -> Option<ScaleRedirect> {
+fn plan_slot_filler(
+    img: &FileImage,
+    code_rva: usize,
+    items: u32,
+    transfer_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Option<ScaleRedirect> {
     if !(1..=127).contains(&items) {
         return None;
     }
-    let span = find_slot_filler(img)?;
+    let span = find_slot_filler(img, transfer_anchor, slot_format, policy)?;
     let mut plan = plan_scale_in(img, code_rva, span, items)?;
     if plan.patches.len() != 1 {
         return None;
@@ -431,12 +501,25 @@ pub struct PagePlan {
     pub patches: Vec<(usize, Vec<u8>, Vec<u8>)>,
 }
 
-/// Plan all three sites (slot filler + two page-dot screens), or fail.
-pub fn plan_all(img: &FileImage, items: u32) -> Result<Vec<PagePlan>, String> {
+/// Plan the slot filler (required) plus the two page-dot screens
+/// (best effort). Anchors and the xref policy come from the mod spec,
+/// so string renames and duplicate xrefs are fixed in `mod.toml`.
+/// Missing dots stay vanilla with a warning while the slot pages
+/// still apply.
+pub fn plan_all(
+    img: &FileImage,
+    items: u32,
+    transfer_anchor: &str,
+    craft_anchor: &str,
+    slot_format: &str,
+    policy: XrefPolicy,
+) -> Result<(Vec<PagePlan>, Vec<String>), String> {
     let (code_rva, _) = img.text_range().ok_or("no .text in image")?;
     let mut plans = Vec::new();
-    let sf = plan_slot_filler(img, code_rva, items)
-        .ok_or("slot filler (called from TRANSFER_RECEIVE_DESC, uses SLOT%02d) was not found")?;
+    let mut warnings = Vec::new();
+    let sf = plan_slot_filler(img, code_rva, items, transfer_anchor, slot_format, policy).ok_or(
+        format!("slot filler (called from {transfer_anchor}, uses {slot_format}) was not found"),
+    )?;
     plans.push(PagePlan {
         label: "Slot filler",
         cave_rva: sf.cave_rva,
@@ -444,17 +527,28 @@ pub fn plan_all(img: &FileImage, items: u32) -> Result<Vec<PagePlan>, String> {
         patches: sf.patches,
     });
     for (anchor, label) in [
-        ("TRANSFER_RECEIVE_DESC", "Transfer Items dots"),
-        ("PRODUCTS_ALL", "Craft Product dots"),
+        (transfer_anchor, "Transfer Items dots"),
+        (craft_anchor, "Craft Product dots"),
     ] {
-        let p = plan_scale_redirect(img, code_rva, anchor, items)
-            .ok_or(format!("{label}: anchor {anchor} was not unique"))?;
-        plans.push(PagePlan {
-            label,
-            cave_rva: p.cave_rva,
-            scale: p.scale,
-            patches: p.patches,
-        });
+        match plan_scale_redirect(img, code_rva, anchor, items, policy) {
+            Some(p) => plans.push(PagePlan {
+                label,
+                cave_rva: p.cave_rva,
+                scale: p.scale,
+                patches: p.patches,
+            }),
+            None => {
+                let refs = anchor_xrefs(img, anchor);
+                if refs.len() != 1 {
+                    warnings.push(format!(
+                        "{label}: anchor {anchor} has {} xrefs, want 1",
+                        refs.len()
+                    ));
+                } else {
+                    warnings.push(format!("{label}: no 0.125 scale load in {anchor} function"));
+                }
+            }
+        }
     }
-    Ok(plans)
+    Ok((plans, warnings))
 }

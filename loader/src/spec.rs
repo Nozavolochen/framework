@@ -20,6 +20,28 @@
 //! offset = 15
 //! ```
 
+/// How strictly a page-size-override anchor must resolve.
+/// `Unique` fails closed unless exactly one xref outer applies (the
+/// pre-Forsaken behavior). `AnyOuterWithScale` tries every xref outer
+/// and keeps the single one that yields a scale plan, for game builds
+/// where a second string-table xref shares the anchor text. The mod
+/// picks the policy, so game drift is fixed in `mod.toml`, not the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XrefPolicy {
+    Unique,
+    AnyOuterWithScale,
+}
+
+impl XrefPolicy {
+    fn from_key(key: &str) -> Option<Self> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "unique" => Some(Self::Unique),
+            "any-outer-with-scale" => Some(Self::AnyOuterWithScale),
+            _ => None,
+        }
+    }
+}
+
 /// A patch operation with its parameters.
 #[derive(Debug, Clone)]
 pub enum Op {
@@ -45,7 +67,16 @@ pub enum Op {
         offset: usize,
     },
     /// String-anchored page-scale redirect; all-or-none with cave guards.
-    PageSizeOverride { items: u32 },
+    /// Anchors and the xref policy are per-mod data, so a game update
+    /// that renames a string or duplicates an xref is fixed by editing
+    /// the mod, not the host.
+    PageSizeOverride {
+        items: u32,
+        transfer_anchor: String,
+        craft_anchor: String,
+        slot_format: String,
+        xref_policy: XrefPolicy,
+    },
     /// Single-hit hook on the slot renderer with vanilla-metric guards.
     DetourWithArgOverrides {
         pat: Vec<u8>,
@@ -278,6 +309,10 @@ struct PatchBuilder {
     expect: Option<String>,
     bytes: Option<String>,
     items: Option<u32>,
+    transfer_anchor: Option<String>,
+    craft_anchor: Option<String>,
+    slot_format: Option<String>,
+    xref_policy: Option<String>,
     slot_width: Option<i32>,
     cargo_rows: Option<i32>,
     tech_rows: Option<i32>,
@@ -342,11 +377,30 @@ impl PatchBuilder {
                         .ok_or(format!("patch {id}: retarget-jmp without offset"))?,
                 }
             }
-            "page-size-override" => Op::PageSizeOverride {
-                items: self
-                    .items
-                    .ok_or(format!("patch {id}: page-size-override without items"))?,
-            },
+            "page-size-override" => {
+                let policy_src = self.xref_policy.clone().unwrap_or_else(|| "unique".into());
+                let policy = XrefPolicy::from_key(&policy_src).ok_or(format!(
+                    "patch {id}: unknown xref_policy {policy_src:?} (unique, any-outer-with-scale)"
+                ))?;
+                Op::PageSizeOverride {
+                    items: self
+                        .items
+                        .ok_or(format!("patch {id}: page-size-override without items"))?,
+                    transfer_anchor: self
+                        .transfer_anchor
+                        .clone()
+                        .unwrap_or_else(|| "TRANSFER_RECEIVE_DESC".into()),
+                    craft_anchor: self
+                        .craft_anchor
+                        .clone()
+                        .unwrap_or_else(|| "PRODUCTS_ALL".into()),
+                    slot_format: self
+                        .slot_format
+                        .clone()
+                        .unwrap_or_else(|| "SLOT%02d".into()),
+                    xref_policy: policy,
+                }
+            }
             "detour-with-arg-overrides" => {
                 let (pat, mask) = decode_pattern(&self.pattern.ok_or(format!(
                     "patch {id}: detour-with-arg-overrides without pattern"
@@ -546,6 +600,10 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
                 "expect" => b.expect = Some(unquote(v)),
                 "bytes" => b.bytes = Some(unquote(v)),
                 "items" => b.items = parse_num(v),
+                "transfer_anchor" => b.transfer_anchor = Some(unquote(v)),
+                "craft_anchor" => b.craft_anchor = Some(unquote(v)),
+                "slot_format" => b.slot_format = Some(unquote(v)),
+                "xref_policy" => b.xref_policy = Some(unquote(v)),
                 "slot_width" => b.slot_width = parse_num(v),
                 "cargo_rows" => b.cargo_rows = parse_num(v),
                 "tech_rows" => b.tech_rows = parse_num(v),
@@ -813,5 +871,73 @@ label = "Quellzeile"
         let toml = format!("{TEXT_TOML}\n[[patch]]\nid = \"p\"\nop = \"force-branch\"\npattern = \"48 3b df\"\noffset = 1\n");
         let m = parse_mod(&toml).unwrap();
         assert_eq!(m.patches.len(), 1);
+    }
+
+    const PAGE_TOML: &str = r#"
+[mod]
+id = "eu.savagecore.page_mod"
+
+[[patch]]
+id = "popup-pages"
+op = "page-size-override"
+items = 24
+"#;
+
+    fn page_op(toml: &str) -> Op {
+        let m = parse_mod(toml).unwrap();
+        assert_eq!(m.patches.len(), 1);
+        m.patches.into_iter().next().unwrap().op
+    }
+
+    #[test]
+    fn page_size_override_defaults() {
+        match page_op(PAGE_TOML) {
+            Op::PageSizeOverride {
+                items,
+                transfer_anchor,
+                craft_anchor,
+                slot_format,
+                xref_policy,
+            } => {
+                assert_eq!(items, 24);
+                assert_eq!(transfer_anchor, "TRANSFER_RECEIVE_DESC");
+                assert_eq!(craft_anchor, "PRODUCTS_ALL");
+                assert_eq!(slot_format, "SLOT%02d");
+                assert_eq!(xref_policy, XrefPolicy::Unique);
+            }
+            other => panic!("wrong op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_size_override_explicit_keys() {
+        let toml = format!(
+            "{PAGE_TOML}transfer_anchor = \"TX_DESC\"\ncraft_anchor = \"MAKE_ALL\"\nslot_format = \"SLOT%03d\"\nxref_policy = \"any-outer-with-scale\"\n"
+        );
+        match page_op(&toml) {
+            Op::PageSizeOverride {
+                transfer_anchor,
+                craft_anchor,
+                slot_format,
+                xref_policy,
+                ..
+            } => {
+                assert_eq!(transfer_anchor, "TX_DESC");
+                assert_eq!(craft_anchor, "MAKE_ALL");
+                assert_eq!(slot_format, "SLOT%03d");
+                assert_eq!(xref_policy, XrefPolicy::AnyOuterWithScale);
+            }
+            other => panic!("wrong op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_size_override_rejects_bad_schema() {
+        // Missing items.
+        let toml = PAGE_TOML.replace("items = 24\n", "");
+        assert!(parse_mod(&toml).is_err());
+        // Unknown policy.
+        let toml = format!("{PAGE_TOML}xref_policy = \"closest\"\n");
+        assert!(parse_mod(&toml).is_err());
     }
 }
