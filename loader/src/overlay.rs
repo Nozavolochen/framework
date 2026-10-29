@@ -27,6 +27,8 @@ use crate::spec::{Mod, Setting, SettingKind};
 
 /// Backtick: the overlay key.
 const VK_OEM_3: i32 = 0xC0;
+/// Tab: switch between the Settings and Mods pages.
+const VK_TAB: i32 = 0x09;
 const VK_SHIFT: i32 = 0x10;
 
 /// UTF-8 overlay text as NUL-terminated UTF-16 for the W drawing
@@ -152,7 +154,34 @@ struct Group {
     id: String,
     label: String,
     description: String,
+    /// The mod's `[mod] enabled` flag: settings rows of a disabled
+    /// mod render dimmed and ignore edits.
+    enabled: bool,
     collapsed: bool,
+}
+
+/// Overlay pages. Settings is today's adjustable-rows list; Mods
+/// lists every installed mod with its on/off switch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Page {
+    #[default]
+    Settings,
+    Mods,
+}
+
+/// One Mods-page row: every loaded mod (including settings-less
+/// ones the Settings page skips), plus unloadable folders carrying
+/// their parse error.
+#[derive(Debug, Clone)]
+struct ModEntry {
+    folder: String,
+    mod_id: String,
+    label: String,
+    version: String,
+    description: String,
+    enabled: bool,
+    /// Some when the folder failed to parse: shown instead of a switch.
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,12 +201,15 @@ struct Overlay {
     window_dead: bool,
     /// Repaint needed (nav, edit, reload, resize).
     dirty: bool,
+    page: Page,
     groups: Vec<Group>,
     /// Flat rows and the selected index.
     rows: Vec<Row>,
     /// Selectable items (headers + visible rows).
     items: Vec<Item>,
     selected: usize,
+    mod_entries: Vec<ModEntry>,
+    mod_selected: usize,
     /// Key state for edge detection + repeat.
     prev: Vec<(i32, bool, u32)>,
     /// Text being typed (setting index, buffer).
@@ -185,6 +217,9 @@ struct Overlay {
     /// Optimistic values written this session, until the reload
     /// picks them up: ((mod, setting), value, tick).
     pending: Vec<((String, String), String, u64)>,
+    /// Optimistic mod on/off switches, until the reload confirms
+    /// them: (mod id, enabled, tick).
+    pending_mods: Vec<(String, bool, u64)>,
     tick: u64,
 }
 
@@ -216,7 +251,9 @@ fn shift_down() -> bool {
 
 impl Overlay {
     /// Rebuild groups and rows from the loaded mods, preserving
-    /// collapsed groups by mod id.
+    /// collapsed groups by mod id. Also rebuilds the Mods-page
+    /// entries, which unlike the Settings page include settings-less
+    /// mods and unloadable folders.
     fn rebuild(&mut self, mods: &[Mod]) {
         let collapsed: Vec<String> = self
             .groups
@@ -227,27 +264,28 @@ impl Overlay {
         let mut groups = Vec::new();
         let mut rows = Vec::new();
         for m in mods {
-            // The overlay is a settings UI: mods with nothing to
-            // tune stay out (their patches still apply at boot).
-            if m.settings.is_empty() {
-                continue;
-            }
-            groups.push(Group {
-                id: m.id.clone(),
-                label: if m.label.is_empty() {
-                    m.id.clone()
-                } else {
-                    m.label.clone()
-                },
-                description: m.description.clone(),
-                collapsed: collapsed.contains(&m.id),
-            });
-            for s in &m.settings {
-                rows.push(Row {
-                    folder: String::new(),
-                    mod_id: m.id.clone(),
-                    setting: s.clone(),
+            // The Settings page is a settings UI: mods with nothing
+            // to tune stay out (their patches still apply at boot).
+            // The Mods page below lists them.
+            if !m.settings.is_empty() {
+                groups.push(Group {
+                    id: m.id.clone(),
+                    label: if m.label.is_empty() {
+                        m.id.clone()
+                    } else {
+                        m.label.clone()
+                    },
+                    description: m.description.clone(),
+                    enabled: m.enabled,
+                    collapsed: collapsed.contains(&m.id),
                 });
+                for s in &m.settings {
+                    rows.push(Row {
+                        folder: String::new(),
+                        mod_id: m.id.clone(),
+                        setting: s.clone(),
+                    });
+                }
             }
         }
         // Fill folders from the host's folder-by-id map.
@@ -263,7 +301,56 @@ impl Overlay {
         self.groups = groups;
         self.rows = rows;
         self.rebuild_items();
+        self.rebuild_mods(mods, &map);
+        self.prune_pending_mods();
         self.dirty = true;
+    }
+
+    /// Rebuild the Mods-page entries: every loaded mod, then any
+    /// unloadable folders with their parse errors.
+    fn rebuild_mods(&mut self, mods: &[Mod], map: &[(String, String)]) {
+        let mut entries = Vec::new();
+        for m in mods {
+            let folder = map
+                .iter()
+                .find(|(id, _)| *id == m.id)
+                .map(|(_, f)| f.clone())
+                .unwrap_or_default();
+            entries.push(ModEntry {
+                folder,
+                mod_id: m.id.clone(),
+                label: if m.label.is_empty() {
+                    m.id.clone()
+                } else {
+                    m.label.clone()
+                },
+                version: m.version.clone(),
+                description: m.description.clone(),
+                enabled: m.enabled,
+                error: None,
+            });
+        }
+        // Drop entries with no folder (same failed-lookup rule as rows).
+        entries.retain(|e| !e.folder.is_empty());
+        for (folder, error) in crate::host::load_errors() {
+            if entries.iter().any(|e| e.folder == folder) {
+                continue;
+            }
+            entries.push(ModEntry {
+                folder: folder.clone(),
+                mod_id: folder.clone(),
+                label: folder,
+                version: String::new(),
+                description: String::new(),
+                enabled: false,
+                error: Some(error),
+            });
+        }
+        entries.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        self.mod_entries = entries;
+        self.mod_selected = self
+            .mod_selected
+            .min(self.mod_entries.len().saturating_sub(1));
     }
 
     fn rebuild_items(&mut self) {
@@ -341,6 +428,11 @@ impl Overlay {
 
     fn adjust(&mut self, dir: i32) {
         let Some(row) = self.rows.get(self.selected_row()).cloned() else {
+            return;
+        };
+        // Disabled mods render dimmed and ignore value edits; the
+        // Mods page owns their switch.
+        if !self.mod_on(&row.mod_id) {
             return;
         };
         let new_value: Option<String> = match row.setting.kind {
@@ -463,6 +555,86 @@ impl Overlay {
         }
     }
 
+    /// Whether the mod is switched on, per the last rebuild.
+    /// Unknown ids read as on (fail-open: rows stay adjustable).
+    fn mod_on(&self, mod_id: &str) -> bool {
+        self.groups
+            .iter()
+            .find(|g| g.id == mod_id)
+            .is_none_or(|g| g.enabled)
+    }
+
+    /// Mods-page display state: the optimistic switch until the
+    /// reload confirms it, else the loaded flag.
+    fn mod_display(&self, idx: usize) -> Option<bool> {
+        let entry = self.mod_entries.get(idx)?;
+        if entry.error.is_some() {
+            return None;
+        }
+        if let Some((_, v, _)) = self
+            .pending_mods
+            .iter()
+            .rev()
+            .find(|(id, _, _)| id == &entry.mod_id)
+        {
+            return Some(*v);
+        }
+        Some(entry.enabled)
+    }
+
+    fn is_mod_pending(&self, idx: usize) -> bool {
+        match self.mod_entries.get(idx) {
+            Some(entry) => self
+                .pending_mods
+                .iter()
+                .any(|(id, _, _)| id == &entry.mod_id),
+            None => false,
+        }
+    }
+
+    /// Drop optimistic switches the reload has confirmed (the live
+    /// value now matches what was written).
+    fn prune_pending_mods(&mut self) {
+        let entries = &self.mod_entries;
+        self.pending_mods
+            .retain(|(id, v, _)| !entries.iter().any(|e| &e.mod_id == id && &e.enabled == v));
+    }
+
+    /// Flip the selected Mods-page entry's switch.
+    fn toggle_mod(&mut self) {
+        if let Some(entry) = self.mod_entries.get(self.mod_selected).cloned() {
+            if entry.error.is_some() {
+                return;
+            }
+            let next = !self.mod_display(self.mod_selected).unwrap_or(entry.enabled);
+            self.commit_mod(entry, next);
+        }
+    }
+
+    /// Write one mod's `enabled` flag to its mod.toml, apply it live
+    /// (quietly), and remember it for instant display. The existing
+    /// file-watch reload path retunes every patch of the mod, so
+    /// enable and disable both take effect without a restart.
+    fn commit_mod(&mut self, entry: ModEntry, value: bool) {
+        let ok = write_mod_enabled(&entry.folder, value);
+        self.tick += 1;
+        let tick = self.tick;
+        self.pending_mods.retain(|(id, _, _)| id != &entry.mod_id);
+        self.pending_mods.push((entry.mod_id.clone(), value, tick));
+        self.dirty = true;
+        if !ok {
+            crate::log::append(
+                "nozavolochen.log",
+                &format!("overlay: could not write enabled in MODS\\{}", entry.folder),
+            );
+            return;
+        }
+        if crate::host::poll_reload_quiet() {
+            self.rebuild(&crate::locale::localized_mods());
+        }
+        self.prune_pending_mods();
+    }
+
     /// Handle one frame of input. Returns false when the overlay
     /// should close. Keyboard only: the game holds the pointer grab
     /// under Proton, so there is no mouse to speak of.
@@ -471,6 +643,18 @@ impl Overlay {
         if key_edge(self, 0x1B).0 {
             self.editing = None;
             return false;
+        }
+        // Tab switches pages; any text edit is dropped.
+        if key_edge(self, VK_TAB).0 && self.editing.is_none() {
+            self.page = match self.page {
+                Page::Settings => Page::Mods,
+                Page::Mods => Page::Settings,
+            };
+            self.dirty = true;
+            return true;
+        }
+        if self.page == Page::Mods {
+            return self.input_mods();
         }
         if self.editing.is_some() {
             return self.input_text();
@@ -501,6 +685,11 @@ impl Overlay {
                 }
                 Some(Item::Row(_)) => {
                     if let Some(row) = self.selected_row_item() {
+                        // Disabled mods ignore value edits (adjust
+                        // already guards bool/enum/float/int).
+                        if !self.mod_on(&row.mod_id) {
+                            return true;
+                        }
                         match row.setting.kind {
                             SettingKind::Bool => self.adjust(0),
                             SettingKind::Enum => self.adjust(1),
@@ -515,7 +704,8 @@ impl Overlay {
                 None => {}
             }
         }
-        // Delete resets the selection to its default.
+        // Delete resets the selection to its default. Rows of a
+        // disabled mod ignore it (their values are frozen while off).
         if key_edge(self, 0x2E).0 {
             match self.items.get(self.selected) {
                 Some(Item::Header(g)) => {
@@ -526,15 +716,54 @@ impl Overlay {
                         .cloned()
                         .collect();
                     for row in rows {
-                        self.reset_row(&row);
+                        if self.mod_on(&row.mod_id) {
+                            self.reset_row(&row);
+                        }
                     }
                 }
                 Some(Item::Row(_)) => {
                     if let Some(row) = self.selected_row_item() {
-                        self.reset_row(&row);
+                        if self.mod_on(&row.mod_id) {
+                            self.reset_row(&row);
+                        }
                     }
                 }
                 None => {}
+            }
+        }
+        true
+    }
+
+    /// Handle one frame of input on the Mods page. Returns false
+    /// when the overlay should close.
+    fn input_mods(&mut self) -> bool {
+        let (up_e, up_r) = key_edge(self, 0x26);
+        let (dn_e, dn_r) = key_edge(self, 0x28);
+        if (up_e || up_r) && self.mod_selected > 0 {
+            self.mod_selected -= 1;
+            self.dirty = true;
+        }
+        if (dn_e || dn_r) && self.mod_selected + 1 < self.mod_entries.len() {
+            self.mod_selected += 1;
+            self.dirty = true;
+        }
+        let (lf_e, lf_r) = key_edge(self, 0x25);
+        let (rt_e, rt_r) = key_edge(self, 0x27);
+        if lf_e || lf_r {
+            self.toggle_mod();
+        }
+        if rt_e || rt_r {
+            self.toggle_mod();
+        }
+        if key_edge(self, 0x0D).0 {
+            self.toggle_mod();
+        }
+        // Delete resets the mod to enabled.
+        if key_edge(self, 0x2E).0 {
+            if let Some(entry) = self.mod_entries.get(self.mod_selected).cloned() {
+                if entry.error.is_none() && !entry.enabled {
+                    self.commit_mod(entry, true);
+                }
             }
         }
         true
@@ -747,6 +976,70 @@ fn write_setting_value(folder: &str, setting_id: &str, kind: &SettingKind, value
     std::fs::write(&path, out.join("\n")).is_ok()
 }
 
+/// Pure rewrite of the `[mod] enabled` line for tests and the
+/// overlay switch. Preserves every other byte; inserts the line
+/// when absent. Returns None when there is no `[mod]` section.
+fn rewrite_enabled_in_text(text: &str, enabled: bool) -> Option<String> {
+    let rendered = if enabled { "true" } else { "false" };
+    let mut out: Vec<String> = Vec::new();
+    let mut in_mod = false;
+    let mut value_line: Option<usize> = None;
+    let mut done = false;
+    for raw in text.lines() {
+        let stripped = raw.split(['#', ';']).next().unwrap_or("").trim();
+        if stripped.starts_with('[') {
+            // Close the [mod] section.
+            if in_mod && !done {
+                if let Some(vl) = value_line {
+                    out[vl] = format!("enabled = {rendered}");
+                } else {
+                    out.push(format!("enabled = {rendered}"));
+                }
+                done = true;
+            }
+            in_mod = stripped.eq_ignore_ascii_case("[mod]");
+            value_line = None;
+            out.push(raw.to_string());
+            continue;
+        }
+        if in_mod {
+            if let Some((k, _)) = stripped.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("enabled") {
+                    value_line = Some(out.len());
+                }
+            }
+        }
+        out.push(raw.to_string());
+    }
+    // Trailing [mod] section.
+    if in_mod && !done {
+        if let Some(vl) = value_line {
+            out[vl] = format!("enabled = {rendered}");
+        } else {
+            out.push(format!("enabled = {rendered}"));
+        }
+        done = true;
+    }
+    done.then(|| out.join("\n"))
+}
+
+/// Rewrite one mod's `[mod] enabled` line in its mod.toml,
+/// preserving every other byte. Inserts the line when absent.
+fn write_mod_enabled(folder: &str, enabled: bool) -> bool {
+    let Some(dir) = crate::host::mods_dir() else {
+        return false;
+    };
+    let sep = if dir.contains('\\') { "\\" } else { "/" };
+    let path = format!("{dir}{sep}{folder}{sep}mod.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(next) = rewrite_enabled_in_text(&text, enabled) else {
+        return false;
+    };
+    std::fs::write(&path, next).is_ok()
+}
+
 type PresentFn = unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32;
 type PeekFn = unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32) -> i32;
 
@@ -854,8 +1147,8 @@ fn swallow_key(vk: u32) -> bool {
         return false;
     }
     match vk {
-        // Navigation, toggle, reset, close.
-        0x25..=0x28 | 0x0D | 0x1B | 0x2E | 0xC0 => true,
+        // Navigation, toggle, reset, page switch, close.
+        0x25..=0x28 | 0x0D | 0x1B | 0x2E | 0xC0 | 0x09 => true,
         // Text entry extras.
         0x08 | 0x20 | 0xBD | 0xBE => EDITING.load(Ordering::Relaxed),
         0x30..=0x39 | 0x41..=0x5A => EDITING.load(Ordering::Relaxed),
@@ -1041,6 +1334,8 @@ impl Overlay {
         self.game_hwnd = 0;
         self.editing = None;
         self.selected = 0;
+        self.mod_selected = 0;
+        self.page = Page::Settings;
         // Cheap (two small file reads): NMS hot-applies language
         // changes, so re-resolve on every open.
         let (lang, source) = crate::locale::refresh();
@@ -1180,11 +1475,27 @@ impl Overlay {
     }
 
     fn panel_h(&self) -> i32 {
-        136 + self
-            .items
-            .iter()
-            .map(|it| self.item_height(it))
-            .sum::<i32>()
+        136 + if self.page == Page::Mods {
+            self.mod_entries
+                .iter()
+                .map(|e| self.mod_entry_height(e))
+                .sum::<i32>()
+        } else {
+            self.items
+                .iter()
+                .map(|it| self.item_height(it))
+                .sum::<i32>()
+        }
+    }
+
+    /// Height of one Mods-page entry: entries with a description or
+    /// a parse error take a second line for the byline.
+    fn mod_entry_height(&self, entry: &ModEntry) -> i32 {
+        if !entry.description.is_empty() || entry.error.is_some() {
+            44
+        } else {
+            26
+        }
     }
 
     /// Paint the whole panel with GDI. Called on open and whenever
@@ -1264,152 +1575,304 @@ impl Overlay {
             };
             FillRect(hdc, &rulerect, rule);
             DeleteObject(rule);
+            // Page tabs, right-aligned: the active page in brackets.
+            // Page names stay English (like key labels); only the
+            // footer actions translate.
+            let tabs = match self.page {
+                Page::Settings => "[Settings]  Mods",
+                Page::Mods => "Settings  [Mods]",
+            };
+            let tabw = wide(tabs);
+            let mut tabsz = SIZE { cx: 0, cy: 0 };
+            GetTextExtentPoint32W(hdc, tabw.as_ptr(), (tabw.len() - 1) as i32, &mut tabsz);
+            let mut tbrc = RECT {
+                left: w - 16 - tabsz.cx,
+                top: 12,
+                right: w - 16,
+                bottom: 38,
+            };
+            DrawTextW(
+                hdc,
+                tabw.as_ptr(),
+                -1,
+                &mut tbrc,
+                0x00000000 | 0x00000020 | 0x00000800,
+            );
             SelectObject(hdc, regular);
-            // Groups and rows.
+            // Mods page: one row per installed mod, then the shared footer.
             let mut y = 52;
-            for (n, item) in self.items.iter().enumerate() {
-                match item {
-                    Item::Header(g) => {
-                        let group = &self.groups[*g];
-                        SelectObject(hdc, bold);
-                        SetTextColor(hdc, 0x00FFFFFF);
-                        let mut mrc = RECT {
-                            left: 16,
+            if self.page == Page::Mods {
+                let (lang, _) = crate::locale::current();
+                let c = |key: &str| crate::locale::chrome(&lang, key);
+                for n in 0..self.mod_entries.len() {
+                    let entry = self.mod_entries[n].clone();
+                    let tall = !entry.description.is_empty() || entry.error.is_some();
+                    let h = if tall { 44 } else { 26 };
+                    if n == self.mod_selected {
+                        let sel = CreateSolidBrush(0x005A463C); // BGR (60,70,90)
+                        let srect = RECT {
+                            left: 8,
                             top: y,
-                            right: w - 16,
-                            bottom: y + 26,
+                            right: w - 8,
+                            bottom: y + h,
                         };
-                        let marker = if group.collapsed { "[+]" } else { "[-]" };
-                        let text = wide(&format!(
-                            "{}{} {}",
-                            if n == self.selected { "> " } else { "  " },
-                            marker,
-                            group.label
-                        ));
-                        DrawTextW(
-                            hdc,
-                            text.as_ptr(),
-                            -1,
-                            &mut mrc,
-                            0x00000000 | 0x00000020 | 0x00000800,
-                        );
-                        SelectObject(hdc, regular);
-                        if group.description.is_empty() {
-                            y += 26;
-                        } else {
-                            // Byline under the mod name, dim gray.
-                            SetTextColor(hdc, 0x00909090);
-                            let mut drc = RECT {
-                                left: 52,
-                                top: y + 22,
-                                right: w - 16,
-                                bottom: y + 44,
-                            };
-                            let dtext = wide(&group.description);
-                            DrawTextW(
-                                hdc,
-                                dtext.as_ptr(),
-                                -1,
-                                &mut drc,
-                                0x00000000 | 0x00000020 | 0x00000800,
-                            );
-                            y += 44;
-                        }
+                        FillRect(hdc, &srect, sel);
+                        DeleteObject(sel);
                     }
-                    Item::Row(r) => {
-                        let row = self.rows[*r].clone();
-                        let tall = !row.setting.description.is_empty();
-                        let h = if tall { 44 } else { 26 };
-                        if n == self.selected {
-                            let sel = CreateSolidBrush(0x005A463C); // BGR (60,70,90)
-                            let srect = RECT {
-                                left: 8,
-                                top: y,
-                                right: w - 8,
-                                bottom: y + h,
-                            };
-                            FillRect(hdc, &srect, sel);
-                            DeleteObject(sel);
-                        }
-                        let marker = if n == self.selected { "> " } else { "  " };
-                        let val = match &self.editing {
-                            Some((e, buf)) if *e == *r => format!("{buf}_"),
-                            _ => self.render_value(*r),
-                        };
-                        // Pending (unconfirmed) values render amber; the rest
-                        // follow the selection.
-                        let pending = self.is_pending(*r);
+                    let marker = if n == self.mod_selected { "> " } else { "  " };
+                    SelectObject(hdc, bold);
+                    SetTextColor(
+                        hdc,
+                        if n == self.mod_selected {
+                            0x00FFFFFF
+                        } else {
+                            0x00CCCCCC
+                        },
+                    );
+                    let mut mrc = RECT {
+                        left: 16,
+                        top: y,
+                        right: w - 16,
+                        bottom: y + 26,
+                    };
+                    let title = if entry.version.is_empty() {
+                        format!("{marker}{}", entry.label)
+                    } else {
+                        format!("{marker}{} {}", entry.label, entry.version)
+                    };
+                    DrawTextW(
+                        hdc,
+                        wide(&title).as_ptr(),
+                        -1,
+                        &mut mrc,
+                        0x00000000 | 0x00000020 | 0x00000800,
+                    );
+                    SelectObject(hdc, regular);
+                    // State right-aligned: on/off, or error for
+                    // unloadable folders. Pending switches render amber.
+                    let state: &str = match self.mod_display(n) {
+                        None => "error",
+                        Some(true) => c("on"),
+                        Some(false) => c("off"),
+                    };
+                    let pending = self.is_mod_pending(n);
+                    SetTextColor(
+                        hdc,
+                        if entry.error.is_some() || pending {
+                            0x0082CDFF
+                        } else if n == self.mod_selected {
+                            0x00FFFFFF
+                        } else {
+                            0x00CCCCCC
+                        },
+                    );
+                    let mut ext = SIZE { cx: 0, cy: 0 };
+                    let statew = wide(state);
+                    GetTextExtentPoint32W(
+                        hdc,
+                        statew.as_ptr(),
+                        (statew.len() - 1) as i32,
+                        &mut ext,
+                    );
+                    let mut vrc = RECT {
+                        left: w - 20 - ext.cx,
+                        top: y,
+                        right: w - 20,
+                        bottom: y + 26,
+                    };
+                    DrawTextW(
+                        hdc,
+                        wide(state).as_ptr(),
+                        -1,
+                        &mut vrc,
+                        0x00000000 | 0x00000020 | 0x00000800,
+                    );
+                    if tall {
+                        // Explainer or parse error under the name;
+                        // errors render amber so they stand out.
                         SetTextColor(
                             hdc,
-                            if pending {
+                            if entry.error.is_some() {
                                 0x0082CDFF
-                            } else if n == self.selected {
-                                0x00FFFFFF
                             } else {
-                                0x00CCCCCC
+                                0x00909090
                             },
                         );
-                        let mut rrc = RECT {
-                            left: 28,
-                            top: y,
-                            right: w - 20,
-                            bottom: y + 26,
+                        let mut drc = RECT {
+                            left: 52,
+                            top: y + 22,
+                            right: w - 16,
+                            bottom: y + 44,
                         };
-                        let label_text = wide(&format!("{}{}:", marker, row.setting.label));
+                        let byline = entry.error.as_deref().unwrap_or(&entry.description);
+                        // Truncate parse errors to one line.
+                        let byline: String = byline
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(90)
+                            .collect();
                         DrawTextW(
                             hdc,
-                            label_text.as_ptr(),
+                            wide(&byline).as_ptr(),
                             -1,
-                            &mut rrc,
+                            &mut drc,
                             0x00000000 | 0x00000020 | 0x00000800,
                         );
-                        // Value right-aligned.
-                        let mut ext = SIZE { cx: 0, cy: 0 };
-                        let valw = wide(&val);
-                        GetTextExtentPoint32W(
-                            hdc,
-                            valw.as_ptr(),
-                            (valw.len() - 1) as i32,
-                            &mut ext,
-                        );
-                        let mut vrc = RECT {
-                            left: w - 20 - ext.cx,
-                            top: y,
-                            right: w - 20,
-                            bottom: y + 26,
-                        };
-                        let vtext = wide(&val);
-                        DrawTextW(
-                            hdc,
-                            vtext.as_ptr(),
-                            -1,
-                            &mut vrc,
-                            0x00000000 | 0x00000020 | 0x00000800,
-                        );
-                        if tall {
-                            // Explainer under the setting, dim gray.
-                            SetTextColor(hdc, 0x00909090);
-                            let mut drc = RECT {
-                                left: 52,
-                                top: y + 22,
+                    }
+                    y += h;
+                }
+            } else {
+                // Groups and rows.
+                for (n, item) in self.items.iter().enumerate() {
+                    match item {
+                        Item::Header(g) => {
+                            let group = &self.groups[*g];
+                            SelectObject(hdc, bold);
+                            SetTextColor(hdc, 0x00FFFFFF);
+                            let mut mrc = RECT {
+                                left: 16,
+                                top: y,
                                 right: w - 16,
-                                bottom: y + 44,
+                                bottom: y + 26,
                             };
-                            let dtext = wide(&row.setting.description);
+                            let marker = if group.collapsed { "[+]" } else { "[-]" };
+                            let text = wide(&format!(
+                                "{}{} {}",
+                                if n == self.selected { "> " } else { "  " },
+                                marker,
+                                group.label
+                            ));
                             DrawTextW(
                                 hdc,
-                                dtext.as_ptr(),
+                                text.as_ptr(),
                                 -1,
-                                &mut drc,
+                                &mut mrc,
                                 0x00000000 | 0x00000020 | 0x00000800,
                             );
+                            SelectObject(hdc, regular);
+                            if group.description.is_empty() {
+                                y += 26;
+                            } else {
+                                // Byline under the mod name, dim gray.
+                                SetTextColor(hdc, 0x00909090);
+                                let mut drc = RECT {
+                                    left: 52,
+                                    top: y + 22,
+                                    right: w - 16,
+                                    bottom: y + 44,
+                                };
+                                let dtext = wide(&group.description);
+                                DrawTextW(
+                                    hdc,
+                                    dtext.as_ptr(),
+                                    -1,
+                                    &mut drc,
+                                    0x00000000 | 0x00000020 | 0x00000800,
+                                );
+                                y += 44;
+                            }
                         }
-                        y += h;
+                        Item::Row(r) => {
+                            let row = self.rows[*r].clone();
+                            let tall = !row.setting.description.is_empty();
+                            let h = if tall { 44 } else { 26 };
+                            if n == self.selected {
+                                let sel = CreateSolidBrush(0x005A463C); // BGR (60,70,90)
+                                let srect = RECT {
+                                    left: 8,
+                                    top: y,
+                                    right: w - 8,
+                                    bottom: y + h,
+                                };
+                                FillRect(hdc, &srect, sel);
+                                DeleteObject(sel);
+                            }
+                            let marker = if n == self.selected { "> " } else { "  " };
+                            let val = match &self.editing {
+                                Some((e, buf)) if *e == *r => format!("{buf}_"),
+                                _ => self.render_value(*r),
+                            };
+                            // Pending (unconfirmed) values render amber; rows
+                            // of a disabled mod render dimmed; the rest
+                            // follow the selection.
+                            let pending = self.is_pending(*r);
+                            let live = self.mod_on(&row.mod_id);
+                            SetTextColor(
+                                hdc,
+                                if pending {
+                                    0x0082CDFF
+                                } else if !live {
+                                    0x00909090
+                                } else if n == self.selected {
+                                    0x00FFFFFF
+                                } else {
+                                    0x00CCCCCC
+                                },
+                            );
+                            let mut rrc = RECT {
+                                left: 28,
+                                top: y,
+                                right: w - 20,
+                                bottom: y + 26,
+                            };
+                            let label_text = wide(&format!("{}{}:", marker, row.setting.label));
+                            DrawTextW(
+                                hdc,
+                                label_text.as_ptr(),
+                                -1,
+                                &mut rrc,
+                                0x00000000 | 0x00000020 | 0x00000800,
+                            );
+                            // Value right-aligned.
+                            let mut ext = SIZE { cx: 0, cy: 0 };
+                            let valw = wide(&val);
+                            GetTextExtentPoint32W(
+                                hdc,
+                                valw.as_ptr(),
+                                (valw.len() - 1) as i32,
+                                &mut ext,
+                            );
+                            let mut vrc = RECT {
+                                left: w - 20 - ext.cx,
+                                top: y,
+                                right: w - 20,
+                                bottom: y + 26,
+                            };
+                            let vtext = wide(&val);
+                            DrawTextW(
+                                hdc,
+                                vtext.as_ptr(),
+                                -1,
+                                &mut vrc,
+                                0x00000000 | 0x00000020 | 0x00000800,
+                            );
+                            if tall {
+                                // Explainer under the setting, dim gray.
+                                SetTextColor(hdc, 0x00909090);
+                                let mut drc = RECT {
+                                    left: 52,
+                                    top: y + 22,
+                                    right: w - 16,
+                                    bottom: y + 44,
+                                };
+                                let dtext = wide(&row.setting.description);
+                                DrawTextW(
+                                    hdc,
+                                    dtext.as_ptr(),
+                                    -1,
+                                    &mut drc,
+                                    0x00000000 | 0x00000020 | 0x00000800,
+                                );
+                            }
+                            y += h;
+                        }
                     }
                 }
-            }
-            // Footer: keys amber, actions gray. Key names are keyboard
-            // labels and stay untranslated; actions come from chrome.
+            } // Page::Settings items loop
+              // Footer: keys amber, actions gray. Key names are keyboard
+              // labels and stay untranslated; actions come from chrome.
             let (lang, _) = crate::locale::current();
             let c = |key: &str| crate::locale::chrome(&lang, key);
             self.draw_footer_line(
@@ -1427,7 +1890,7 @@ impl Overlay {
                 hdc,
                 h - 30,
                 &[
-                    ("esc", &format!(" {}  ", c("close"))),
+                    ("tab", &format!(" {}  ", c("switch"))),
                     ("`", &format!(" {}", c("close"))),
                 ],
             );
@@ -1579,5 +2042,63 @@ pub fn install(log: &mut Log) -> Result<String, String> {
         ensure_thread();
         log.line("overlay key is backtick (`)");
         Ok(format!("present hook @ iat rva {slot_rva:#x}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MOD_TOML: &str =
+        "[mod]\nid = \"x\"\nversion = \"0.0.0\"\nenabled = true\nlabel = \"X\"\n";
+
+    #[test]
+    fn enabled_rewrites_in_place() {
+        let out = rewrite_enabled_in_text(MOD_TOML, false).unwrap();
+        assert!(out.contains("enabled = false"));
+        assert!(!out.contains("enabled = true"));
+        // Every other line survives byte-for-byte.
+        assert!(out.contains("id = \"x\"\nversion = \"0.0.0\"\n"));
+        assert!(out.contains("label = \"X\""));
+    }
+
+    #[test]
+    fn enabled_re_enables() {
+        let off = rewrite_enabled_in_text(MOD_TOML, false).unwrap();
+        let on = rewrite_enabled_in_text(&off, true).unwrap();
+        assert!(out_lines_contain(&on, "enabled = true"));
+        assert_eq!(on.lines().count(), MOD_TOML.lines().count());
+    }
+
+    #[test]
+    fn enabled_inserts_when_absent() {
+        // Mid-file: before the next section.
+        let toml = "[mod]\nid = \"x\"\n\n[[setting]]\nid = \"s\"\nkind = \"bool\"\nlabel = \"S\"\ndefault = true\n";
+        let out = rewrite_enabled_in_text(toml, false).unwrap();
+        let mod_end = out.find("[[setting]]").unwrap();
+        assert!(out[..mod_end].contains("enabled = false"));
+        // Trailing [mod] section: appended at the end.
+        let toml = "[[patch]]\nid = \"p\"\n\n[mod]\nid = \"x\"\n";
+        let out = rewrite_enabled_in_text(toml, true).unwrap();
+        assert!(out.ends_with("enabled = true"));
+    }
+
+    #[test]
+    fn enabled_needs_mod_section() {
+        assert!(rewrite_enabled_in_text("[[setting]]\nid = \"s\"\n", true).is_none());
+        assert!(rewrite_enabled_in_text("", false).is_none());
+    }
+
+    #[test]
+    fn enabled_ignores_same_named_setting_keys() {
+        // A setting whose id is "enabled" must not be touched.
+        let toml = "[mod]\nid = \"x\"\nenabled = true\n\n[[setting]]\nid = \"enabled\"\nkind = \"bool\"\nlabel = \"E\"\ndefault = true\n";
+        let out = rewrite_enabled_in_text(toml, false).unwrap();
+        assert_eq!(out.matches("enabled = false").count(), 1);
+        assert!(out.contains("id = \"enabled\""));
+    }
+
+    fn out_lines_contain(out: &str, line: &str) -> bool {
+        out.lines().any(|l| l.trim() == line)
     }
 }

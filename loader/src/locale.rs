@@ -58,6 +58,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("nl", "adjust") => "aanpassen",
         ("nl", "ok") => "ok",
         ("nl", "reset") => "resetten",
+        ("nl", "switch") => "wisselen",
         ("nl", "close") => "sluiten",
         ("de", "on") => "an",
         ("de", "off") => "aus",
@@ -65,6 +66,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("de", "adjust") => "anpassen",
         ("de", "ok") => "ok",
         ("de", "reset") => "zurücksetzen",
+        ("de", "switch") => "wechseln",
         ("de", "close") => "schließen",
         ("fr", "on") => "oui",
         ("fr", "off") => "non",
@@ -72,6 +74,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("fr", "adjust") => "ajuster",
         ("fr", "ok") => "ok",
         ("fr", "reset") => "réinitialiser",
+        ("fr", "switch") => "changer",
         ("fr", "close") => "fermer",
         ("it", "on") => "sì",
         ("it", "off") => "no",
@@ -79,6 +82,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("it", "adjust") => "regolare",
         ("it", "ok") => "ok",
         ("it", "reset") => "reimpostare",
+        ("it", "switch") => "cambiare",
         ("it", "close") => "chiudere",
         ("es", "on") => "sí",
         ("es", "off") => "no",
@@ -86,6 +90,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("es", "adjust") => "ajustar",
         ("es", "ok") => "ok",
         ("es", "reset") => "restablecer",
+        ("es", "switch") => "cambiar",
         ("es", "close") => "cerrar",
         ("es-419", "on") => "sí",
         ("es-419", "off") => "no",
@@ -93,6 +98,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("es-419", "adjust") => "ajustar",
         ("es-419", "ok") => "ok",
         ("es-419", "reset") => "restablecer",
+        ("es-419", "switch") => "cambiar",
         ("es-419", "close") => "cerrar",
         ("ru", "on") => "да",
         ("ru", "off") => "нет",
@@ -100,6 +106,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("ru", "adjust") => "настроить",
         ("ru", "ok") => "OK",
         ("ru", "reset") => "сбросить",
+        ("ru", "switch") => "переключить",
         ("ru", "close") => "закрыть",
         ("pl", "on") => "tak",
         ("pl", "off") => "nie",
@@ -107,6 +114,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("pl", "adjust") => "dostosować",
         ("pl", "ok") => "OK",
         ("pl", "reset") => "zresetować",
+        ("pl", "switch") => "przełączyć",
         ("pl", "close") => "zamknąć",
         ("pt", "on") => "sim",
         ("pt", "off") => "não",
@@ -114,6 +122,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("pt", "adjust") => "ajustar",
         ("pt", "ok") => "ok",
         ("pt", "reset") => "repor",
+        ("pt", "switch") => "mudar",
         ("pt", "close") => "fechar",
         ("pt-BR", "on") => "sim",
         ("pt-BR", "off") => "não",
@@ -121,6 +130,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("pt-BR", "adjust") => "ajustar",
         ("pt-BR", "ok") => "ok",
         ("pt-BR", "reset") => "redefinir",
+        ("pt-BR", "switch") => "alternar",
         ("pt-BR", "close") => "fechar",
         ("ja", "on") => "オン",
         ("ja", "off") => "オフ",
@@ -128,6 +138,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("ja", "adjust") => "調整する",
         ("ja", "ok") => "OK",
         ("ja", "reset") => "リセット",
+        ("ja", "switch") => "切り替え",
         ("ja", "close") => "閉じる",
         ("zh", "on") => "开",
         ("zh", "off") => "关",
@@ -135,6 +146,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("zh", "adjust") => "调整",
         ("zh", "ok") => "确定",
         ("zh", "reset") => "重置",
+        ("zh", "switch") => "切换",
         ("zh", "close") => "关闭",
         ("zh-Hant", "on") => "開",
         ("zh-Hant", "off") => "關",
@@ -142,6 +154,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("zh-Hant", "adjust") => "調整",
         ("zh-Hant", "ok") => "確定",
         ("zh-Hant", "reset") => "重設",
+        ("zh-Hant", "switch") => "切換",
         ("zh-Hant", "close") => "關閉",
         ("ko", "on") => "켜짐",
         ("ko", "off") => "꺼짐",
@@ -149,6 +162,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         ("ko", "adjust") => "조정",
         ("ko", "ok") => "확인",
         ("ko", "reset") => "재설정",
+        ("ko", "switch") => "전환",
         ("ko", "close") => "닫기",
         (_, "on") => "on",
         (_, "off") => "off",
@@ -156,6 +170,7 @@ pub fn chrome(lang: &str, key: &str) -> &'static str {
         (_, "adjust") => "adjust",
         (_, "ok") => "ok",
         (_, "reset") => "reset",
+        (_, "switch") => "switch",
         (_, "close") => "close",
         _ => "",
     }
@@ -382,8 +397,10 @@ label = "BRrij"
         assert_eq!(chrome("nl", "adjust"), "aanpassen");
         assert_eq!(chrome("nl", "ok"), "ok");
         assert_eq!(chrome("nl", "reset"), "resetten");
+        assert_eq!(chrome("nl", "switch"), "wisselen");
         assert_eq!(chrome("nl", "close"), "sluiten");
         assert_eq!(chrome("xx", "on"), "on");
+        assert_eq!(chrome("xx", "switch"), "switch");
         assert_eq!(chrome("nl", "nope"), "");
     }
 
@@ -394,7 +411,9 @@ label = "BRrij"
             "en", "de", "fr", "it", "es", "es-419", "ru", "pl", "nl", "pt", "pt-BR", "ja", "zh",
             "zh-Hant", "ko",
         ] {
-            for key in ["on", "off", "select", "adjust", "ok", "reset", "close"] {
+            for key in [
+                "on", "off", "select", "adjust", "ok", "reset", "switch", "close",
+            ] {
                 assert!(!chrome(lang, key).is_empty(), "{lang}/{key}");
             }
         }

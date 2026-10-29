@@ -73,7 +73,17 @@ pub struct Snapshot {
     pub spec: Mod,
 }
 
+/// One mod folder whose mod.toml failed to parse: kept so the
+/// overlay Mods page can list it with its error instead of
+/// silently dropping it (the log line alone is invisible in game).
+#[derive(Debug, Clone)]
+pub struct LoadError {
+    pub folder: String,
+    pub error: String,
+}
+
 static KNOWN: OnceLock<Mutex<Vec<Snapshot>>> = OnceLock::new();
+static KNOWN_ERRORS: OnceLock<Mutex<Vec<LoadError>>> = OnceLock::new();
 
 fn mod_path(folder: &str) -> Option<String> {
     let dir = mods_dir()?;
@@ -89,6 +99,7 @@ fn file_mtime(path: &str) -> Option<SystemTime> {
 /// folder's mod.toml mtime for live reload.
 pub fn snapshot(log: &mut Log) -> Vec<Snapshot> {
     let mut out: Vec<Snapshot> = Vec::new();
+    let mut errors: Vec<LoadError> = Vec::new();
     let Some(dir) = mods_dir() else {
         log.line("mods: host path unknown, no mods loaded");
         return out;
@@ -119,7 +130,17 @@ pub fn snapshot(log: &mut Log) -> Vec<Snapshot> {
                     out.push(snap);
                 }
             }
-            Err(e) => log.line(&format!("MODS\\{sub}: mod.toml NOT LOADED - {e}")),
+            Err(e) => {
+                log.line(&format!("MODS\\{sub}: mod.toml NOT LOADED - {e}"));
+                if let Some(slot) = errors.iter_mut().find(|x| x.folder == sub) {
+                    slot.error = e;
+                } else {
+                    errors.push(LoadError {
+                        folder: sub,
+                        error: e,
+                    });
+                }
+            }
         }
     }
     let _ = KNOWN.set(Mutex::new(
@@ -131,6 +152,7 @@ pub fn snapshot(log: &mut Log) -> Vec<Snapshot> {
             })
             .collect(),
     ));
+    let _ = KNOWN_ERRORS.set(Mutex::new(errors));
     out
 }
 
@@ -145,6 +167,21 @@ pub fn folder_map() -> Vec<(String, String)> {
     guard
         .iter()
         .map(|s| (s.spec.id.clone(), s.folder.clone()))
+        .collect()
+}
+
+/// (folder, error) for every mod folder that failed to parse, for
+/// the overlay Mods page. Folders that parsed never appear here.
+pub fn load_errors() -> Vec<(String, String)> {
+    let Some(known) = KNOWN_ERRORS.get() else {
+        return Vec::new();
+    };
+    let Ok(guard) = known.lock() else {
+        return Vec::new();
+    };
+    guard
+        .iter()
+        .map(|e| (e.folder.clone(), e.error.clone()))
         .collect()
 }
 
@@ -218,12 +255,33 @@ fn poll_impl(loud: bool) -> bool {
                         crate::log::append("nozavolochen.log", &line);
                     }
                 }
+                // A fixed file stops being a load error.
+                if let Some(errs) = KNOWN_ERRORS.get() {
+                    if let Ok(mut guard) = errs.lock() {
+                        guard.retain(|x| x.folder != snap.folder);
+                    }
+                }
                 snap.spec = spec;
             }
-            Err(e) => crate::log::append(
-                "nozavolochen.log",
-                &format!("  MODS\\{}: mod.toml NOT RELOADED - {e}", snap.folder),
-            ),
+            Err(e) => {
+                crate::log::append(
+                    "nozavolochen.log",
+                    &format!("  MODS\\{}: mod.toml NOT RELOADED - {e}", snap.folder),
+                );
+                // A newly broken file joins the overlay Mods page errors.
+                if let Some(errs) = KNOWN_ERRORS.get() {
+                    if let Ok(mut guard) = errs.lock() {
+                        if let Some(slot) = guard.iter_mut().find(|x| x.folder == snap.folder) {
+                            slot.error.clone_from(&e);
+                        } else {
+                            guard.push(LoadError {
+                                folder: snap.folder.clone(),
+                                error: e,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
     changed
