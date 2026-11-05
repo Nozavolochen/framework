@@ -68,7 +68,7 @@ fn subdirs(dir: &str) -> Vec<String> {
 
 /// One loaded mod folder with the mod.toml mtime it was read at.
 pub struct Snapshot {
-    folder: String,
+    pub folder: String,
     mtime: Option<SystemTime>,
     pub spec: Mod,
 }
@@ -194,6 +194,54 @@ pub fn current_mods() -> Vec<Mod> {
         return Vec::new();
     };
     guard.iter().map(|s| s.spec.clone()).collect()
+}
+
+/// DLLs dropped into mod folders that have no mod.toml, as
+/// (folder, full path), sorted. Folders that contain a mod.toml name
+/// their plugin instead, so a stray DLL there is never picked up and
+/// `enabled = false` still switches it off.
+pub fn loose_plugins() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Some(dir) = mods_dir() else {
+        return found;
+    };
+    let sep = if dir.contains('\\') { "\\" } else { "/" };
+    for sub in subdirs(&dir) {
+        if std::path::Path::new(&format!("{dir}{sep}{sub}{sep}mod.toml")).exists() {
+            continue;
+        }
+        let folder = format!("{dir}{sep}{sub}");
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.file_type().is_ok_and(|t| t.is_file()) && crate::plugin::valid_name(&name) {
+                found.push((sub.clone(), format!("{folder}{sep}{name}")));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Full path of a mod folder's plugin DLL, or why it can't be used.
+/// `folder` is the folder name under GAMEDATA/MODS (from the snapshot),
+/// `name` must be a bare `.dll` file name so it can only point inside
+/// that folder.
+pub fn plugin_path(folder: &str, name: &str) -> Result<String, String> {
+    if !crate::plugin::valid_name(name) {
+        return Err(format!(
+            "{name:?} must be a .dll file name in the mod folder"
+        ));
+    }
+    let dir = mods_dir().ok_or("host path unknown")?;
+    let sep = if dir.contains('\\') { "\\" } else { "/" };
+    let path = format!("{dir}{sep}{folder}{sep}{name}");
+    if !std::path::Path::new(&path).is_file() {
+        return Err(format!("{name} not found in MODS\\{folder}"));
+    }
+    Ok(path)
 }
 
 /// Re-read any mod.toml whose mtime moved and push changed tuning

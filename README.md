@@ -1,9 +1,9 @@
 # Nozavolochen (/ˌnəʊzəvəˈlɒtʃɛn/, "convergence")
 
-One `xinput9_1_0.dll` hosts any number of independent spec-driven
+One `xinput9_1_0.dll` hosts any number of independent
 runtime mods for No Man's Sky. Each mod is a folder with a
 `mod.toml` describing pattern patches the loader applies at game
-boot.
+boot, optionally plus a native plugin DLL it loads alongside.
 
 **Docs**: https://nozavolochen.github.io/docs/
 
@@ -16,8 +16,8 @@ flat `xinput9_1_0.dll` at the root, marked as a required dependency on Nexus by 
 - **Amethyst (Routing Rule, one-time):** Data tab > Routing Rules (bottom, near Search) > Add > Destinations: `Binaries`, Extensions: `.dll` > Save, then deploy.
 - **Manual install (no manager):** drop `xinput9_1_0.dll` into the game's `Binaries/` folder.
 
-Mods ship only their `mod.toml` (plus static files if required) and never bundle
-the DLL.
+Mods ship their `mod.toml` (plus static files if required, plus an
+optional native plugin DLL) and never bundle the framework DLL.
 
 ## Strings
 

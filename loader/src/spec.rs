@@ -6,6 +6,7 @@
 //! id = "eu.savagecore.example_mod"
 //! version = "0.1.0"
 //! enabled = true
+//! plugin = "ExampleMod.dll" # optional: native DLL in this mod's folder
 //!
 //! [[setting]]
 //! id = "example-patch"   # matches a patch id: bool toggles it
@@ -164,6 +165,9 @@ pub struct Mod {
     /// One-line byline shown under the group header; empty hides it.
     pub description: String,
     pub enabled: bool,
+    /// Optional native plugin: a `.dll` file name in the mod's own
+    /// folder, loaded after patches apply. Follows `enabled`.
+    pub plugin: Option<String>,
     pub settings: Vec<Setting>,
     pub patches: Vec<Patch>,
     pub texts: Vec<TextEntry>,
@@ -446,6 +450,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
     let mut label = String::new();
     let mut description = String::new();
     let mut enabled = true;
+    let mut plugin: Option<String> = None;
     let mut settings: Vec<Setting> = Vec::new();
     let mut patches: Vec<Patch> = Vec::new();
     let mut cur: Option<PatchBuilder> = None;
@@ -623,6 +628,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
                         enabled = b;
                     }
                 }
+                "plugin" => plugin = Some(unquote(v)),
                 _ => {}
             }
         }
@@ -648,6 +654,7 @@ pub fn parse_mod(text: &str) -> Result<Mod, String> {
         label: if label.is_empty() { id } else { label },
         description,
         enabled,
+        plugin,
         settings,
         patches,
         texts,
@@ -724,6 +731,18 @@ bytes = "66 0f 1f 44 00 00"
         );
         let m = parse_mod(&toml).unwrap();
         assert_eq!(m.description, "Test byline.");
+    }
+
+    #[test]
+    fn mod_plugin_parsed_empty_by_default() {
+        let m = parse_mod(EXAMPLE_TOML).unwrap();
+        assert!(m.plugin.is_none());
+        let toml = EXAMPLE_TOML.replace(
+            "enabled = true\n",
+            "enabled = true\nplugin = \"ExampleMod.dll\"\n",
+        );
+        let m = parse_mod(&toml).unwrap();
+        assert_eq!(m.plugin.as_deref(), Some("ExampleMod.dll"));
     }
 
     #[test]

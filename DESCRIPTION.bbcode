@@ -2,7 +2,7 @@
 One shared host DLL for independent spec-driven runtime mods[/center]
 [b]What it does[/b]
 
-Nozavolochen (Korvax for "convergence") is a single `xinput9_1_0.dll` that hosts any number of mods. Each mod is a folder with a `mod.toml` describing pattern patches the loader applies at game boot. Mods that are static data only need no framework support at all.
+Nozavolochen (Korvax for "convergence") is a single `xinput9_1_0.dll` that hosts any number of mods. Each mod is a folder with a `mod.toml` describing pattern patches the loader applies at game boot, optionally plus a native plugin DLL it loads alongside. Mods that are static data only need no framework support at all.
 
 On its own, Nozavolochen does nothing. It only provides the infrastructure for mods to hook into the game.
 
