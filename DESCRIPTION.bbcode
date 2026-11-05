@@ -13,7 +13,7 @@ Nozavolochen exists to unify mod loading under a single DLL, reducing conflicts 
 [b]Install[/b]
 [list]
 [*][b]Vortex:[/b] install with no extra steps. It routes the DLL into `Binaries/` for you.[/*]
-[*][b]Amethyst (Routing Rule, one-time):[/b] [b]Data tab > Routing Rules[/b] (bottom, near Search) [b]> Add > Destination:[/b] `Binaries`, [b]Filenames:[/b] `xinput9_1_0.dll` [b]> Save[/b], then deploy. Only the framework DLL is routed by name, so plugin files stay in their mod folders. Screenshot of the finished rule and converting proxy-based mods: [url=https://nozavolochen.github.io/docs/users/amethyst/]Amethyst guide[/url].[/*]
+[*][b]Amethyst[/b]: Routing Rules > Add: [b]Destination:[/b] `Binaries`, [b]Filenames:[/b] `xinput9_1_0.dll` > Save, then deploy. [url=https://nozavolochen.github.io/docs/users/amethyst/]Guide with screenshot[/url].[/*]
 [*][b]Manual install (no manager):[/b] drop `xinput9_1_0.dll` into the game's `Binaries/` folder.[/*]
 [/list]
 Then install any Nozavolochen mods normally; each declares this mod as a required dependency.

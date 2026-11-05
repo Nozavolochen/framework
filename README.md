@@ -13,7 +13,7 @@ The framework ships as its own [release](https://www.nexusmods.com/nomanssky/mod
 flat `xinput9_1_0.dll` at the root, marked as a required dependency on Nexus by your mod.
 
 - **Vortex:** install with no extra steps. It routes the DLL into `Binaries/` for you.
-- **Amethyst (Routing Rule, one-time):** Data tab > Routing Rules (bottom, near Search) > Add > Destination: `Binaries`, Filenames: `xinput9_1_0.dll` > Save, then deploy. Only the framework DLL is routed by name, so plugin files stay in their mod folders.
+- **Amethyst**: Routing Rules > Add: **Destination**: `Binaries`, **Filenames**: `xinput9_1_0.dll` > Save, then deploy. [Guide with screenshot](https://nozavolochen.github.io/docs/users/amethyst/).
 - **Manual install (no manager):** drop `xinput9_1_0.dll` into the game's `Binaries/` folder.
 
 Mods ship their `mod.toml` (plus static files if required, plus an
