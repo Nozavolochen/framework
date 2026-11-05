@@ -19,7 +19,7 @@
 //! vkGetDeviceProcAddr, bypassing the present IAT slot).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::log::Log;
@@ -27,8 +27,16 @@ use crate::spec::{Mod, Setting, SettingKind};
 
 use nozavolochen_strings::Strings;
 
-/// Backtick: the overlay key.
+/// Grave key: the overlay key by physical position (the key left
+/// of 1; backtick on US layouts). Virtual-key 0xC0 is
+/// layout-dependent (on some layouts the same VK yields another
+/// character, and the grave character lives on another VK), so the
+/// toggle listens for the scan code and polls whatever VK the active
+/// layout maps it to.
 const VK_OEM_3: i32 = 0xC0;
+/// Scan code set 1 for the grave key (left of 1, DIK_GRAVE).
+/// Layout-independent: the same physical key on every layout.
+const SC_GRAVE: u32 = 0x29;
 /// Tab: switch between the Settings and Mods pages.
 const VK_TAB: i32 = 0x09;
 const VK_SHIFT: i32 = 0x10;
@@ -56,6 +64,29 @@ static EDITING: AtomicBool = AtomicBool::new(false);
 /// go blind the moment capture starts. Polled state is the OR of
 /// physical and hook-seen state.
 static HOOK_DOWN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+/// Hook-seen state for the grave-key scan code. The polled VK varies
+/// with the layout, so the physical key gets its own flag outside the
+/// VK-indexed table above.
+static SC_GRAVE_DOWN: AtomicBool = AtomicBool::new(false);
+/// Whether the Steam overlay is up. Written by the Steam callback
+/// (game thread) and read by the input thread. While set, the panel
+/// stays closed and swallows nothing: muted like the game.
+static STEAM_OPEN: AtomicBool = AtomicBool::new(false);
+/// Steam watch state. The game pumps SteamAPI_RunCallbacks, so a
+/// GameOverlayActivated_t registration (id 331) is dispatched
+/// without any polling. Registration runs once on the input thread.
+/// If steam_api64.dll or RegisterCallback is missing (GOG, future
+/// SDK), the watch stays off after one log line and the panel
+/// behaves as if there were no watch.
+static mut STEAM_WATCH_INIT: bool = false;
+/// GameOverlayActivated_t: k_iSteamFriendsCallbacks (300) + 31.
+const OVERLAY_CALLBACK_ID: i32 = 331;
+/// The game client window the panel pins to. The toggle and capture
+/// only apply when this exact window is foreground, so typing in a
+/// Steam overlay chat (or any other window) never toggles us. Set on
+/// first sight; every later sight of another same-process window is
+/// treated as not-the-game rather than re-pinning.
+static GAME_HWND: AtomicIsize = AtomicIsize::new(0);
 static mut PRESENT_ORIG: usize = 0;
 static mut PUMP_ORIG: usize = 0;
 static mut WAS_DOWN: bool = false;
@@ -76,6 +107,12 @@ pub fn is_open() -> bool {
     OPEN.load(Ordering::Relaxed)
 }
 
+/// Layout-independent toggle predicate: the physical grave key.
+/// Pure so it stays unit-testable without Win32.
+fn is_toggle_scancode(sc: u32) -> bool {
+    sc == SC_GRAVE
+}
+
 fn key_down(vk: i32) -> bool {
     let hooked = (vk as usize) < 256 && HOOK_DOWN[vk as usize].load(Ordering::Relaxed);
     hooked
@@ -85,17 +122,134 @@ fn key_down(vk: i32) -> bool {
         }
 }
 
+/// Whether the physical grave key is down: hook-seen scan-code state
+/// first (swallowed keys are invisible to GetAsyncKeyState under
+/// Proton), then whatever VK the active layout maps the scan code
+/// to, then the legacy US VK as fallback.
+fn toggle_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyA, MAPVK_VSC_TO_VK_EX};
+    if SC_GRAVE_DOWN.load(Ordering::Relaxed) {
+        return true;
+    }
+    let vk = unsafe { MapVirtualKeyA(SC_GRAVE, MAPVK_VSC_TO_VK_EX) };
+    if vk != 0 && key_down(vk as i32) {
+        return true;
+    }
+    key_down(VK_OEM_3)
+}
+
+/// Pure toggle gate for tests: Steam overlay up or game client not
+/// foreground both suppress the toggle.
+fn toggle_allowed(steam_open: bool, game_foreground: bool) -> bool {
+    !steam_open && game_foreground
+}
+
+/// Minimal CCallbackBase layout (Steamworks): vtable of Run,
+/// Run-with-call-result, and size, then flags and the callback id.
+/// Only Run matters here; the payload is one byte (m_bActive).
+#[repr(C)]
+struct SteamCallbackVTable {
+    run: unsafe extern "system" fn(*mut c_void, *mut c_void),
+    run_extra: unsafe extern "system" fn(*mut c_void, *mut c_void, bool, u64),
+    size: unsafe extern "system" fn(*mut c_void) -> i32,
+}
+
+#[repr(C)]
+struct SteamCallback {
+    vtable: *const SteamCallbackVTable,
+    flags: u32,
+    callback: i32,
+}
+
+/// GameOverlayActivated_t handler: the payload is a single
+/// m_bActive byte. Runs on whatever game thread pumps callbacks;
+/// only flips the atomic, never logs (input thread reports).
+unsafe extern "system" fn steam_overlay_run(_this: *mut c_void, param: *mut c_void) {
+    if !param.is_null() {
+        STEAM_OPEN.store(*(param as *const u8) != 0, Ordering::Relaxed);
+    }
+}
+
+unsafe extern "system" fn steam_overlay_run_extra(
+    this: *mut c_void,
+    param: *mut c_void,
+    _failure: bool,
+    _call: u64,
+) {
+    steam_overlay_run(this, param);
+}
+
+unsafe extern "system" fn steam_overlay_size(_this: *mut c_void) -> i32 {
+    1
+}
+
+static STEAM_VTABLE: SteamCallbackVTable = SteamCallbackVTable {
+    run: steam_overlay_run,
+    run_extra: steam_overlay_run_extra,
+    size: steam_overlay_size,
+};
+
+static mut STEAM_CALLBACK: SteamCallback = SteamCallback {
+    vtable: &STEAM_VTABLE as *const SteamCallbackVTable,
+    flags: 0,
+    callback: OVERLAY_CALLBACK_ID,
+};
+
+/// One-time Steam watch registration on the input thread.
+/// Fail-quiet after one log line: without the game pumping callbacks
+/// the flag simply never flips.
+fn steam_watch_poll() {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    unsafe {
+        if !STEAM_WATCH_INIT {
+            STEAM_WATCH_INIT = true;
+            let api = GetModuleHandleA(b"steam_api64.dll\0".as_ptr());
+            if api.is_null() {
+                crate::log::append(
+                    "nozavolochen.log",
+                    "overlay: steam watch off (no steam_api64)",
+                );
+            } else {
+                let reg = GetProcAddress(api, b"SteamAPI_RegisterCallback\0".as_ptr());
+                let Some(reg) = reg else {
+                    crate::log::append(
+                        "nozavolochen.log",
+                        "overlay: steam watch off (no RegisterCallback)",
+                    );
+                    return;
+                };
+                let reg: unsafe extern "system" fn(*mut c_void, i32) =
+                    std::mem::transmute(reg as usize);
+                reg(
+                    std::ptr::addr_of_mut!(STEAM_CALLBACK) as *mut c_void,
+                    OVERLAY_CALLBACK_ID,
+                );
+                crate::log::append(
+                    "nozavolochen.log",
+                    "overlay: steam watch on (GameOverlayActivated)",
+                );
+            }
+        }
+    }
+}
+
+/// Whether the Steam overlay is currently up (throttled poll above).
+fn steam_overlay_open() -> bool {
+    STEAM_OPEN.load(Ordering::Relaxed)
+}
+
 /// Forget hook-seen keys (on close), so a missed key-up can never
 /// stick a key down.
 fn clear_hook_keys() {
     for slot in HOOK_DOWN.iter() {
         slot.store(false, Ordering::Relaxed);
     }
+    SC_GRAVE_DOWN.store(false, Ordering::Relaxed);
 }
 
-/// The foreground window, when it belongs to this process. Typing
-/// backtick in another app while the game runs must not toggle us.
-fn foreground_window() -> Option<isize> {
+/// The foreground window when it is this process. Typing in another
+/// app while the game runs must not toggle us.
+fn same_process_window() -> Option<isize> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowThreadProcessId,
     };
@@ -111,6 +265,25 @@ fn foreground_window() -> Option<isize> {
         } else {
             None
         }
+    }
+}
+
+/// The foreground window when it is the game client itself: the exact
+/// pinned window, not just any same-process window. A Steam overlay
+/// chat is a different window (often a different process), so typing
+/// the grave character there no longer toggles the panel. Until the
+/// client window has been seen once, the same-process window
+/// bootstraps the pin.
+fn foreground_window() -> Option<isize> {
+    let fg = same_process_window()?;
+    let known = GAME_HWND.load(Ordering::Relaxed);
+    if known == 0 {
+        GAME_HWND.store(fg, Ordering::Relaxed);
+        Some(fg)
+    } else if fg == known {
+        Some(fg)
+    } else {
+        None
     }
 }
 
@@ -642,13 +815,15 @@ impl Overlay {
     /// should close. Keyboard only: the game holds the pointer grab
     /// under Proton, so there is no mouse to speak of.
     fn input(&mut self) -> bool {
-        // Escape closes (backtick is handled by the toggle).
+        // Escape closes (grave is handled by the toggle).
         if key_edge(self, 0x1B).0 {
             self.editing = None;
             return false;
         }
-        // Tab switches pages; any text edit is dropped.
-        if key_edge(self, VK_TAB).0 && self.editing.is_none() {
+        // Tab switches pages; Shift+Tab is the Steam overlay hotkey
+        // and passes through untouched (see swallow_key). Any text
+        // edit is dropped.
+        if key_edge(self, VK_TAB).0 && self.editing.is_none() && !shift_down() {
             self.page = match self.page {
                 Page::Settings => Page::Mods,
                 Page::Mods => Page::Settings,
@@ -1072,6 +1247,7 @@ unsafe extern "system" fn thread_main(_: *mut c_void) -> u32 {
     install_key_hook();
     loop {
         pump_messages();
+        steam_watch_poll();
         poll_toggle();
         maybe_poll_reload();
         if OPEN.load(Ordering::Relaxed) {
@@ -1129,8 +1305,19 @@ unsafe extern "system" fn kb_hook(
                     HOOK_DOWN[kb.vkCode as usize].store(false, Ordering::Relaxed);
                 }
             }
+            // The toggle follows the physical key, so record its scan
+            // code alongside the layout-dependent VK above.
+            if is_toggle_scancode(kb.scanCode) {
+                let down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
+                let up = wparam as u32 == WM_KEYUP || wparam as u32 == WM_SYSKEYUP;
+                if down {
+                    SC_GRAVE_DOWN.store(true, Ordering::Relaxed);
+                } else if up {
+                    SC_GRAVE_DOWN.store(false, Ordering::Relaxed);
+                }
+            }
             if wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN {
-                if swallow_key(kb.vkCode) {
+                if swallow_key(kb.vkCode, kb.scanCode) {
                     return 1;
                 }
             }
@@ -1141,17 +1328,31 @@ unsafe extern "system" fn kb_hook(
 
 /// Whether the game should not see this key right now: overlay keys
 /// while open (plus printable keys in text entry), and only when the
-/// game itself is foreground so other apps are never affected.
-fn swallow_key(vk: u32) -> bool {
+/// game client itself is foreground so other apps (and Steam overlay
+/// chats) are never affected. While the Steam overlay is up nothing
+/// is swallowed at all: muted like the game.
+fn swallow_key(vk: u32, sc: u32) -> bool {
     if !OPEN.load(Ordering::Relaxed) {
+        return false;
+    }
+    if steam_overlay_open() {
         return false;
     }
     if foreground_window().is_none() {
         return false;
     }
+    // The toggle follows the physical key: swallow its scan code on
+    // every layout. The VK entry below stays as fallback for hosts
+    // whose hook reports no scan code.
+    if is_toggle_scancode(sc) {
+        return true;
+    }
     match vk {
-        // Navigation, toggle, reset, page switch, close.
-        0x25..=0x28 | 0x0D | 0x1B | 0x2E | 0xC0 | 0x09 => true,
+        // Navigation, toggle, reset, page switch, close. Tab only
+        // without Shift: Shift+Tab passes through so the Steam
+        // overlay hotkey keeps working while we are open.
+        0x25..=0x28 | 0x0D | 0x1B | 0x2E | 0xC0 => true,
+        0x09 => !shift_down(),
         // Text entry extras.
         0x08 | 0x20 | 0xBD | 0xBE => EDITING.load(Ordering::Relaxed),
         0x30..=0x39 | 0x41..=0x5A => EDITING.load(Ordering::Relaxed),
@@ -1188,12 +1389,12 @@ fn ensure_thread() {
 }
 
 fn poll_toggle() {
-    let down = key_down(VK_OEM_3);
+    let down = toggle_down();
     unsafe {
         let was = WAS_DOWN;
         WAS_DOWN = down;
         if down && !was {
-            if foreground_window().is_some() {
+            if toggle_allowed(steam_overlay_open(), foreground_window().is_some()) {
                 let now_open = !OPEN.load(Ordering::Relaxed);
                 OPEN.store(now_open, Ordering::Relaxed);
                 if now_open {
@@ -1230,10 +1431,20 @@ fn maybe_poll_reload() {
 
 /// One open frame: input, window sync, repaint when dirty.
 fn frame() {
+    if steam_overlay_open() {
+        // Steam overlay up: close rather than sit on top of it.
+        OPEN.store(false, Ordering::Relaxed);
+        clear_hook_keys();
+        if let Ok(mut st) = ui().try_lock() {
+            st.hide();
+        }
+        return;
+    }
     let game = match foreground_window() {
         Some(h) => h,
         None => {
-            // Game lost focus: close rather than linger.
+            // Game client lost focus (alt-tab, or a Steam overlay chat
+            // in front): close rather than linger.
             OPEN.store(false, Ordering::Relaxed);
             clear_hook_keys();
             if let Ok(mut st) = ui().try_lock() {
@@ -2033,7 +2244,7 @@ pub fn install(log: &mut Log) -> Result<String, String> {
         }
 
         ensure_thread();
-        log.line("overlay key is backtick (`)");
+        log.line("overlay key is the grave key (left of 1; backtick on US layouts)");
         Ok(format!("present hook @ iat rva {slot_rva:#x}"))
     }
 }
@@ -2089,6 +2300,37 @@ mod tests {
         let out = rewrite_enabled_in_text(toml, false).unwrap();
         assert_eq!(out.matches("enabled = false").count(), 1);
         assert!(out.contains("id = \"enabled\""));
+    }
+
+    #[test]
+    fn grave_scancode_is_the_toggle() {
+        assert!(is_toggle_scancode(SC_GRAVE));
+        assert!(!is_toggle_scancode(0));
+        assert!(!is_toggle_scancode(0x28));
+        assert!(!is_toggle_scancode(VK_OEM_3 as u32));
+    }
+
+    #[test]
+    fn toggle_gate_suppresses_on_steam_or_unfocused() {
+        assert!(toggle_allowed(false, true));
+        assert!(!toggle_allowed(true, true));
+        assert!(!toggle_allowed(false, false));
+        assert!(!toggle_allowed(true, false));
+    }
+
+    #[test]
+    fn overlay_callback_tracks_active_byte() {
+        let mut active = 1u8;
+        unsafe { steam_overlay_run(std::ptr::null_mut(), &mut active as *mut u8 as *mut c_void) };
+        assert!(steam_overlay_open());
+        let mut inactive = 0u8;
+        unsafe {
+            steam_overlay_run(
+                std::ptr::null_mut(),
+                &mut inactive as *mut u8 as *mut c_void,
+            )
+        };
+        assert!(!steam_overlay_open());
     }
 
     fn out_lines_contain(out: &str, line: &str) -> bool {
