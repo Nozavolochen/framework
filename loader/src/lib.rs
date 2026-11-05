@@ -116,6 +116,13 @@ unsafe fn init(hinst: *mut c_void) {
             path,
         });
     }
+    for (name, path) in host::shared_plugins() {
+        log.line(&format!("Binaries\\plugins\\{name}: plugin {path} queued"));
+        plugins.push(plugin::Plugin {
+            owner: format!("Binaries\\plugins\\{name}"),
+            path,
+        });
+    }
     if !plugin::start(plugins) {
         // Very unlikely; the game still runs, just without plugins.
         log.line("plugins: loader thread could not start, none loaded");

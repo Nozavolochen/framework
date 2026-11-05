@@ -227,8 +227,8 @@ pub fn loose_plugins() -> Vec<(String, String)> {
 
 /// Full path of a mod folder's plugin DLL, or why it can't be used.
 /// `folder` is the folder name under GAMEDATA/MODS (from the snapshot),
-/// `name` must be a bare `.dll` file name so it can only point inside
-/// that folder.
+/// `name` must be a bare `.dll`/`.asi` file name so it can only point
+/// inside that folder.
 pub fn plugin_path(folder: &str, name: &str) -> Result<String, String> {
     if !crate::plugin::valid_name(name) {
         return Err(format!(
@@ -242,6 +242,30 @@ pub fn plugin_path(folder: &str, name: &str) -> Result<String, String> {
         return Err(format!("{name} not found in MODS\\{folder}"));
     }
     Ok(path)
+}
+
+/// Native plugins dropped into the shared `Binaries/plugins/` folder,
+/// as (file name, full path), sorted. ASI-loader style: every `.dll`
+/// or `.asi` there is loaded with no mod.toml and no `enabled` gate.
+/// `.asi` files start through their `InitializeASI` export.
+pub fn shared_plugins() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Some(game) = game_root().and_then(|g| g.into_os_string().into_string().ok()) else {
+        return found;
+    };
+    let sep = if game.contains('\\') { "\\" } else { "/" };
+    let dir = format!("{game}{sep}Binaries{sep}plugins");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return found;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().is_ok_and(|t| t.is_file()) && crate::plugin::valid_name(&name) {
+            found.push((name.clone(), format!("{dir}{sep}{name}")));
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Re-read any mod.toml whose mtime moved and push changed tuning

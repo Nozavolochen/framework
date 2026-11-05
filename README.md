@@ -17,7 +17,7 @@ flat `xinput9_1_0.dll` at the root, marked as a required dependency on Nexus by 
 - **Manual install (no manager):** drop `xinput9_1_0.dll` into the game's `Binaries/` folder.
 
 Mods ship their `mod.toml` (plus static files if required, plus an
-optional native plugin DLL) and never bundle the framework DLL.
+optional native plugin) and never bundle the framework DLL.
 
 ## Strings
 

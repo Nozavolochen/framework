@@ -6,7 +6,8 @@
 //! id = "eu.savagecore.example_mod"
 //! version = "0.1.0"
 //! enabled = true
-//! plugin = "ExampleMod.dll" # optional: native DLL in this mod's folder
+//! plugin = "ExampleMod.dll" # optional: native plugin in this mod's
+//!                           # folder (.dll, or .asi with InitializeASI)
 //!
 //! [[setting]]
 //! id = "example-patch"   # matches a patch id: bool toggles it

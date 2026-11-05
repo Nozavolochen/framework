@@ -27,8 +27,8 @@
 //!
 //! Results are appended to nozavolochen.log under "plugins".
 
-use windows_sys::Win32::Foundation::GetLastError;
-use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 /// One plugin to load: who asked for it (a mod id, or the mod folder
 /// it was dropped into) and the DLL's full path.
@@ -37,11 +37,12 @@ pub struct Plugin {
     pub path: String,
 }
 
-/// A plugin must be a plain file name ending in `.dll`, so it can only
-/// point at a file inside its own folder.
+/// A plugin must be a plain file name ending in `.dll` or `.asi`,
+/// so it can only point at a file inside its own folder.
 pub fn valid_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
     name.len() > 4
-        && name.to_ascii_lowercase().ends_with(".dll")
+        && (lower.ends_with(".dll") || lower.ends_with(".asi"))
         && !name.contains(['/', '\\', ':'])
         && !name.contains("..")
 }
@@ -63,17 +64,45 @@ fn load_all(plugins: &[Plugin]) {
     for p in plugins {
         let wide: Vec<u16> = p.path.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
-            if LoadLibraryW(wide.as_ptr()).is_null() {
+            let handle = LoadLibraryW(wide.as_ptr());
+            if handle.is_null() {
                 let err = GetLastError();
                 crate::log::append(
                     "nozavolochen.log",
                     &format!("  {}: NOT LOADED - {} (error {err})", p.owner, p.path),
                 );
-            } else {
+                continue;
+            }
+            if !p.path.to_ascii_lowercase().ends_with(".asi") {
                 crate::log::append(
                     "nozavolochen.log",
                     &format!("  {}: loaded {}", p.owner, p.path),
                 );
+                continue;
+            }
+            // ASI plugins start through InitializeASI, the same export
+            // an ASI loader would call. A missing export means the
+            // module is unloaded again: it was never a working plugin.
+            let init: Option<unsafe extern "system" fn()> =
+                std::mem::transmute(GetProcAddress(handle, c"InitializeASI".as_ptr() as _));
+            match init {
+                Some(f) => {
+                    f();
+                    crate::log::append(
+                        "nozavolochen.log",
+                        &format!("  {}: loaded {} (InitializeASI ran)", p.owner, p.path),
+                    );
+                }
+                None => {
+                    FreeLibrary(handle);
+                    crate::log::append(
+                        "nozavolochen.log",
+                        &format!(
+                            "  {}: NOT LOADED - {} has no InitializeASI",
+                            p.owner, p.path
+                        ),
+                    );
+                }
             }
         }
     }
