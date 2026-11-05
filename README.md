@@ -9,11 +9,11 @@ boot, optionally plus a native plugin DLL it loads alongside.
 
 ## Mod distribution
 
-The framework ships as its own [release](https://www.nexusmods.com/games/nomanssky/mods/4700?tab=files): an archive with
+The framework ships as its own [release](https://www.nexusmods.com/nomanssky/mods/4700?tab=files): an archive with
 flat `xinput9_1_0.dll` at the root, marked as a required dependency on Nexus by your mod.
 
 - **Vortex:** install with no extra steps. It routes the DLL into `Binaries/` for you.
-- **Amethyst (Routing Rule, one-time):** Data tab > Routing Rules (bottom, near Search) > Add > Destinations: `Binaries`, Extensions: `.dll` > Save, then deploy.
+- **Amethyst (Routing Rule, one-time):** Data tab > Routing Rules (bottom, near Search) > Add > Destination: `Binaries`, Filenames: `xinput9_1_0.dll` > Save, then deploy. Only the framework DLL is routed by name, so plugin files stay in their mod folders.
 - **Manual install (no manager):** drop `xinput9_1_0.dll` into the game's `Binaries/` folder.
 
 Mods ship their `mod.toml` (plus static files if required, plus an
